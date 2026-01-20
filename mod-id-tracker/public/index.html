@@ -1,0 +1,170 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>Project Zomboid - Mod Reupload Tracker</title>
+    <link rel="stylesheet" href="./style.css" />
+</head>
+<body>
+<main class="wrap">
+    <header class="header">
+        <h1>Project Zomboid Mod Reupload Tracker</h1>
+        <p class="sub">Track Steam Workshop Re-uploads • Manage Your Watchlist • Mark Approved Uploads • File Take-downs </p>
+        <p class="sub"><i>Disclaimer: Claude.ai was used to develop this tool.</i></p>
+    </header>
+    <div id="status" class="status"></div>
+    <section class="grid2">
+        <!-- Tracked Mods List -->
+        <section class="card">
+            <!-- Profile Manager Widget -->
+            <div class="profile-manager">
+                <div class="profile-header">
+                    <div class="profile-select-wrapper">
+                        <label for="profileSelect" class="profile-label">Profile:</label>
+                        <select id="profileSelect" class="profile-select"></select>
+                    </div>
+                    <div class="profile-menu">
+                        <button id="profileMenuBtn" class="profile-menu-btn" title="Profile options">⋮</button>
+                        <div id="profileDropdown" class="profile-dropdown">
+                            <button id="newProfileBtn" class="profile-dropdown-item">
+                                <span class="profile-icon">+</span> New Profile
+                            </button>
+                            <button id="renameProfileBtn" class="profile-dropdown-item">
+                                <span class="profile-icon">✎</span> Rename Profile
+                            </button>
+                            <button id="deleteProfileBtn" class="profile-dropdown-item danger">
+                                <span class="profile-icon">✕</span> Delete Profile
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="card-header">
+                <h2>Tracked Mods</h2>
+                <div class="header-actions">
+                    <button id="importProfileBtn" class="secondary-btn" title="Import from Steam profile">Fetch</button>
+                    <button id="exportBtn" class="secondary-btn" title="Export tracked mods">Export</button>
+                    <button id="importBtn" class="secondary-btn" title="Import tracked mods">Import</button>
+                    <button id="deleteAllBtn" class="delete-btn" title="Hold for 1 second to delete all mods" style="padding: 6px 12px; font-size: 13px;">Delete All</button>
+                    <button id="addModBtn" class="add-btn" title="Add new mod">+ Add Mod</button>
+                </div>
+            </div>
+
+            <div id="statsBar" class="stats-bar"></div>
+
+            <div id="trackedList" class="tracked-list"></div>
+
+            <div class="hint">
+                Add mods to track their Workshop reuploads.<br>
+                Each mod can have a list of approved Workshop IDs (comma-separated).
+            </div>
+
+            <div class="row" style="margin-top: 16px;">
+                <button id="runSearchBtn">Run All Searches</button>
+            </div>
+        </section>
+
+        <!-- Results -->
+        <section class="card">
+            <div class="card-header">
+                <h2>Search Results</h2>
+                <div class="header-actions">
+                    <label class="filter-toggle">
+                        <span style="font-size: 11px; text-transform: uppercase; font-weight: 600; color: var(--text-muted); margin-right: 4px;">Sort:</span>
+                        <select id="sortResults" style="padding: 4px 8px; background: var(--bg-secondary); border: 1px solid var(--border); border-radius: 3px; color: var(--text-primary); font-size: 12px; cursor: pointer;">
+                            <option value="default">Default (Search Order)</option>
+                            <option value="found-desc">Most Found</option>
+                            <option value="found-asc">Least Found</option>
+                            <option value="modid-asc">Mod ID (A-Z)</option>
+                            <option value="modid-desc">Mod ID (Z-A)</option>
+                        </select>
+                    </label>
+                    <label class="filter-toggle" style="margin-left: 8px;">
+                        <input type="checkbox" id="filterUnapproved" />
+                        <span>Show only unapproved</span>
+                    </label>
+                    <label class="filter-toggle" style="margin-left: 8px;">
+                        <input type="checkbox" id="hideZeroResults" />
+                        <span>Hide 0 results</span>
+                    </label>
+                    <button id="clearResultsBtn" class="delete-btn" style="padding: 6px 12px; font-size: 13px; margin-left: 8px;" title="Hold for 1 second to clear all results">Clear Results</button>
+                </div>
+            </div>
+            <div id="results"></div>
+        </section>
+
+        <!-- DMCA Manager -->
+        <section class="card dmca-column">
+            <div class="dmca-disclaimer">
+                <strong>Legal Notice:</strong> Filing a DMCA takedown is a legal process. By submitting a claim, you are stating under penalty of perjury that you own the copyright or are authorized to act on the owner's behalf. False claims may result in legal liability under Section 512(f) of the DMCA.<br><br>This tool helps organize potential claims but does not constitute legal advice.<br><br>The verification feature in this tool cannot guarantee 100% accuracy - when in doubt manually verify files.
+            </div>
+            <div class="card-header">
+                <h2>DMCA Manager</h2>
+                <div class="header-actions">
+                    <div>
+                        <button id="configDepotBtn" class="secondary-btn" title="Configure DepotDownloader path">⚙</button>
+                        <button id="verifyDmcaBtn" class="verify-btn" title="Verify DMCA entries by comparing file manifests (requires DepotDownloader)">Verify</button>
+                        <button id="clearVerificationBtn" class="delete-btn" title="Hold for 1 second to clear verification data only" style="padding: 6px 12px; font-size: 13px;">Clear Verification</button>
+                    </div>
+                    <div>
+                        <button id="recheckFiledBtn" class="secondary-btn" title="Re-check filed items to see if they've been taken down">Re-check Filed</button>
+                        <button id="exportDmcaBtn" class="secondary-btn" title="Export DMCA list">Export</button>
+                        <button id="importDmcaBtn" class="secondary-btn" title="Import DMCA list">Import</button>
+                        <button id="clearDmcaBtn" class="delete-btn" title="Hold for 1 second to clear all DMCA entries" style="padding: 6px 12px; font-size: 13px;">Clear All</button>
+                    </div>
+                </div>
+            </div>
+
+            <div class="stats-bar">
+                <div class="stat-item">
+                    <div class="stat-label">Pending</div>
+                    <div class="stat-value" id="dmcaPendingCount">0</div>
+                </div>
+                <div class="stat-item">
+                    <div class="stat-label">Verified</div>
+                    <div class="stat-value" id="dmcaVerifiedCount" style="color: #2196f3;">0</div>
+                </div>
+                <div class="stat-item">
+                    <div class="stat-label">Filed</div>
+                    <div class="stat-value" id="dmcaFiledCount">0</div>
+                </div>
+                <div class="stat-item">
+                    <div class="stat-label">Taken Down</div>
+                    <div class="stat-value" id="dmcaTakenDownCount" style="color: #6a5fa8;">0</div>
+                </div>
+                <div class="stat-item">
+                    <div class="stat-label">Total</div>
+                    <div class="stat-value" id="dmcaTotalCount">0</div>
+                </div>
+            </div>
+
+            <div class="dmca-filters">
+                <label class="filter-toggle">
+                    <input type="checkbox" id="showPendingOnly" />
+                    <span>Show pending only</span>
+                </label>
+                <label class="filter-toggle" style="margin-left: 12px;">
+                    <input type="checkbox" id="showFiledOnly" />
+                    <span>Show filed only</span>
+                </label>
+                <label class="filter-toggle" style="margin-left: 12px;">
+                    <input type="checkbox" id="showTakenDownOnly" />
+                    <span>Show taken down only</span>
+                </label>
+            </div>
+
+            <div id="dmcaManagerList" class="dmca-manager-list"></div>
+
+            <div class="hint" style="margin-top: 12px;">
+                Click "+ DMCA" on search results to add items here.<br>
+                Use "File" to open Steam's DMCA form, then mark as "Filed" when complete.
+            </div>
+        </section>
+    </section>
+</main>
+
+<script src="./app.js"></script>
+</body>
+</html>
