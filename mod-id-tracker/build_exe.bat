@@ -39,8 +39,8 @@ if not exist "public\index.html" (
   exit /b 1
 )
 
-if not exist "verify\verify_dmca_steam.py" (
-  echo ERROR: Missing verify\verify_dmca_steam.py
+if not exist "verify\verify_dmca.py" (
+  echo ERROR: Missing verify\verify_dmca.py
   pause
   exit /b 1
 )
