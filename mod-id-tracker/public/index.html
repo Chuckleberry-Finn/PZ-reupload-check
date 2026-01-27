@@ -81,6 +81,8 @@
                             <option value="modid-desc">Mod ID (Z-A)</option>
                         </select>
                     </label>
+                    <button id="clearResultsBtn" class="delete-btn" style="padding: 6px 12px; font-size: 13px; margin-left: 8px;" title="Hold for 1 second to clear all results">Clear Results</button>
+                    <div>
                     <label class="filter-toggle" style="margin-left: 8px;">
                         <input type="checkbox" id="filterUnapproved" />
                         <span>Show only unapproved</span>
@@ -89,7 +91,7 @@
                         <input type="checkbox" id="hideZeroResults" />
                         <span>Hide 0 results</span>
                     </label>
-                    <button id="clearResultsBtn" class="delete-btn" style="padding: 6px 12px; font-size: 13px; margin-left: 8px;" title="Hold for 1 second to clear all results">Clear Results</button>
+                    </div>
                 </div>
             </div>
             <div id="results"></div>
@@ -97,8 +99,14 @@
 
         <!-- DMCA Manager -->
         <section class="card dmca-column">
-            <div class="dmca-disclaimer">
-                <strong>Legal Notice:</strong> Filing a DMCA takedown is a legal process. By submitting a claim, you are stating under penalty of perjury that you own the copyright or are authorized to act on the owner's behalf. False claims may result in legal liability under Section 512(f) of the DMCA.<br><br>This tool helps organize potential claims but does not constitute legal advice.<br><br>The verification feature in this tool cannot guarantee 100% accuracy - when in doubt manually verify files.
+            <div class="dmca-disclaimer" id="legalNotice">
+                <div class="legal-notice-header" id="legalNoticeToggle">
+                    <span class="legal-notice-icon">▼</span>
+                    <strong>Legal Notice</strong>
+                </div>
+                <div class="legal-notice-content">
+                    Filing a DMCA takedown is a legal process. By submitting a claim, you are stating under penalty of perjury that you own the copyright or are authorized to act on the owner's behalf. False claims may result in legal liability under Section 512(f) of the DMCA.<br><br>This tool helps organize potential claims but does not constitute legal advice.<br><br>The verification feature in this tool cannot guarantee 100% accuracy - when in doubt manually verify files.
+                </div>
             </div>
             <div class="card-header">
                 <h2>DMCA Manager</h2>
@@ -143,15 +151,15 @@
             <div class="dmca-filters">
                 <label class="filter-toggle">
                     <input type="checkbox" id="showPendingOnly" />
-                    <span>Show pending only</span>
+                    <span>Show Pending</span>
                 </label>
                 <label class="filter-toggle" style="margin-left: 12px;">
                     <input type="checkbox" id="showFiledOnly" />
-                    <span>Show filed only</span>
+                    <span>Show Filed</span>
                 </label>
                 <label class="filter-toggle" style="margin-left: 12px;">
                     <input type="checkbox" id="showTakenDownOnly" />
-                    <span>Show taken down only</span>
+                    <span>Show Taken-Down</span>
                 </label>
             </div>
 

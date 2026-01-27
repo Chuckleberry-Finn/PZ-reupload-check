@@ -390,28 +390,26 @@ function renderTrackedList() {
       : '';
 
     item.innerHTML = `
-      <div class="tracked-item-header">
-        <div class="tracked-item-title">Mod Configuration ${lastSearchText}</div>
+      <div class="tracked-item-row tracked-item-labels">
+        <div class="tracked-item-label-group" style="flex: 2;">
+          <span class="tracked-item-label">Mod ID</span>
+          ${lastSearchText}
+        </div>
+        <span class="tracked-item-label" style="flex: 1;">Workshop ID</span>
+      </div>
+      <div class="tracked-item-row">
+        <input type="text" class="modid-input" data-id="${mod.id}" value="${escapeHtml(mod.modId)}" placeholder="e.g., SkillRecoveryJournal" style="flex: 2;" />
+        <input type="text" class="workshopid-input" data-id="${mod.id}" value="${escapeHtml(mod.workshopId)}" placeholder="Optional" style="flex: 1;" />
+      </div>
+      <div class="tracked-item-row tracked-item-labels">
+        <span class="tracked-item-label">Approved Exceptions (Workshop IDs, comma-separated)</span>
         <div class="tracked-item-actions-top">
           <button class="search-single-btn" data-id="${mod.id}" title="Search only this mod">Search</button>
           <button class="delete-btn" data-id="${mod.id}" style="padding: 3px 8px; font-size: 10px;" title="Hold to delete">Delete</button>
         </div>
       </div>
       <div class="tracked-item-row">
-        <label style="flex: 2;">
-          Mod ID
-          <input type="text" class="modid-input" data-id="${mod.id}" value="${escapeHtml(mod.modId)}" placeholder="e.g., SkillRecoveryJournal" />
-        </label>
-        <label style="flex: 1;">
-          Workshop ID
-          <input type="text" class="workshopid-input" data-id="${mod.id}" value="${escapeHtml(mod.workshopId)}" placeholder="Optional" />
-        </label>
-      </div>
-      <div class="tracked-item-row">
-        <label style="flex: 1;">
-          Approved Exceptions (Workshop IDs, comma-separated)
-          <input type="text" class="approved-input" data-id="${mod.id}" value="${escapeHtml(mod.approved)}" placeholder="e.g., 1234567890, 9876543210" />
-        </label>
+        <input type="text" class="approved-input" data-id="${mod.id}" value="${escapeHtml(mod.approved)}" placeholder="e.g., 1234567890, 9876543210" style="flex: 1;" />
       </div>
     `;
 
@@ -1190,6 +1188,11 @@ function renderDmcaManager() {
       // Open the form
       openDmcaForm(btn.dataset.workshopid);
       
+      // Reset after a short delay
+      setTimeout(() => {
+        btn.textContent = originalText;
+        btn.classList.remove("filing");
+      }, 2000);
     });
   });
 
