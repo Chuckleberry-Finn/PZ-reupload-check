@@ -1188,11 +1188,6 @@ function renderDmcaManager() {
       // Open the form
       openDmcaForm(btn.dataset.workshopid);
       
-      // Reset after a short delay
-      setTimeout(() => {
-        btn.textContent = originalText;
-        btn.classList.remove("filing");
-      }, 2000);
     });
   });
 
