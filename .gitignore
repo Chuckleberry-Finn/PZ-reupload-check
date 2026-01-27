@@ -1,3 +1,6 @@
 .idea
 mod-id-tracker/build/*
 mod-id-tracker/_tmp_verify/*
+DepotDownloader.exe
+depots/*
+mod-id-tracker/verify/verify_config.ini
