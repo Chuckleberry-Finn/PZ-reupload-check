@@ -787,6 +787,10 @@ button:active {
     background: #3fa447;
 }
 
+.approve-toggle-btn.add:disabled {
+    display: none;
+}
+
 .approve-toggle-btn.remove {
     background: var(--danger);
     color: #fff;
@@ -1009,11 +1013,50 @@ button:active {
     background: rgba(245, 124, 0, 0.15);
     border: 1px solid var(--warning);
     border-radius: 4px;
-    padding: 12px 14px;
+    padding: 0;
     margin-bottom: 16px;
     font-size: 12px;
     line-height: 1.5;
     color: var(--text-secondary);
+    overflow: hidden;
+}
+
+.legal-notice-header {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 10px 14px;
+    cursor: pointer;
+    user-select: none;
+    transition: background 0.2s;
+}
+
+.legal-notice-header:hover {
+    background: rgba(245, 124, 0, 0.25);
+}
+
+.legal-notice-header strong {
+    color: var(--warning);
+}
+
+.legal-notice-icon {
+    font-size: 10px;
+    color: var(--warning);
+    transition: transform 0.2s;
+}
+
+.dmca-disclaimer.collapsed .legal-notice-icon {
+    transform: rotate(-90deg);
+}
+
+.legal-notice-content {
+    padding: 0 14px 12px 14px;
+    border-top: 1px solid rgba(245, 124, 0, 0.3);
+    padding-top: 10px;
+}
+
+.dmca-disclaimer.collapsed .legal-notice-content {
+    display: none;
 }
 
 .dmca-disclaimer strong {
@@ -1256,16 +1299,23 @@ button:active {
     padding: 4px 10px;
     font-size: 11px;
     font-weight: 600;
-    background: var(--warning);
+    background: #8a85a8;
     color: #fff;
-    border: none;
-    border-radius: 3px;
-    cursor: pointer;
-    transition: background 0.2s;
+    ...
 }
 
 .dmca-file-btn:hover {
-    background: #ff8c00;
+    background: #9590b8;
+}
+
+.dmca-file-btn.filing {
+    background: #4a90d9;
+    animation: filePulse 0.6s ease-in-out infinite;
+}
+
+@keyframes filePulse {
+    0%, 100% { opacity: 1; background: #4a90d9; }
+    50% { opacity: 0.7; background: #6ba3e0; }
 }
 
 .dmca-filed-btn {

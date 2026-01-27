@@ -4,6 +4,7 @@ const LS_DMCA_MANAGER = "dmca_manager_v1";
 const LS_SEARCH_RESULTS = "search_results_v1";
 const LS_PROFILES = "profiles_v1";
 const LS_ACTIVE_PROFILE = "active_profile_v1";
+const LS_LEGAL_NOTICE_COLLAPSED = "legal_notice_collapsed_v1";
 const DEFAULT_PROFILE_NAME = "Default Profile";
 
 const trackedListEl = document.getElementById("trackedList");
@@ -731,10 +732,22 @@ async function searchSingleMod(mod) {
 function renderModGroup(group, mod, data) {
   const modId = mod.modId;
   const approved = getApprovedSet(mod);
-  const nonOriginalCount = (data.items || []).filter(it => !isOriginal(mod, String(it.workshopId || "").trim())).length;
+  const nonOriginalItems = (data.items || []).filter(it => !isOriginal(mod, String(it.workshopId || "").trim()));
+  const nonOriginalCount = nonOriginalItems.length;
+  
+  // Calculate visible count (items that pass the current filter)
+  const visibleCount = filterUnapproved 
+    ? nonOriginalItems.filter(it => !approved.has(String(it.workshopId || "").trim())).length
+    : nonOriginalCount;
+  
   const searchDateStr = data.searchDate ? `<span class="search-date">Searched: ${formatDate(data.searchDate)}</span>` : '';
+  
+  // Show fraction if filtering reduces the visible count
+  const badgeText = (filterUnapproved && visibleCount !== nonOriginalCount) 
+    ? `${visibleCount}/${nonOriginalCount} Found`
+    : `${nonOriginalCount} Found`;
 
-  group.querySelector(".group-header h3").innerHTML = `<code>${escapeHtml(modId)}</code><span class="badge">${nonOriginalCount} Found</span>${searchDateStr}`;
+  group.querySelector(".group-header h3").innerHTML = `<code>${escapeHtml(modId)}</code><span class="badge">${badgeText}</span>${searchDateStr}`;
 
   const content = group.querySelector(".group-content");
   const itemsHtml = (data.items || []).map(it => {
@@ -756,7 +769,7 @@ function renderModGroup(group, mod, data) {
       statusBadge = '<span class="badge status-badge" style="background: var(--success); color: #fff; border-color: var(--success);">APPROVED</span>';
       buttonHtml = `<button class="approve-toggle-btn remove" data-modid="${escapeHtml(modId)}" data-workshopid="${escapeHtml(wid)}">Remove</button>`;
     } else {
-      buttonHtml = `<button class="approve-toggle-btn add" data-modid="${escapeHtml(modId)}" data-workshopid="${escapeHtml(wid)}">+ Approve</button>`;
+      buttonHtml = `<button class="approve-toggle-btn add" data-modid="${escapeHtml(modId)}" data-workshopid="${escapeHtml(wid)}"${inDmca ? ' disabled title="Remove from DMCA list first"' : ''}>+ Approve</button>`;
     }
 
     if (!isOrig) {
@@ -845,6 +858,7 @@ async function renderResults() {
   setStatus(`Done. Searched ${activeMods.length} mod(s).`);
   renderTrackedList();
   updateStats();
+  applyResultsFilters();
 }
 
 function toggleCollapse(modId) {
@@ -990,12 +1004,19 @@ function renderDmcaManager() {
   const showTakenDownOnlyValue = showTakenDownOnly;
 
   let filteredEntries = dmcaEntries;
-  if (showPendingOnlyValue) {
-    filteredEntries = dmcaEntries.filter(e => !e.filedDate && !e.takenDownDate);
-  } else if (showFiledOnlyValue) {
-    filteredEntries = dmcaEntries.filter(e => e.filedDate && !e.takenDownDate);
-  } else if (showTakenDownOnlyValue) {
-    filteredEntries = dmcaEntries.filter(e => e.takenDownDate);
+  
+  // If any filter is active, use OR logic to show matching entries
+  const anyFilterActive = showPendingOnlyValue || showFiledOnlyValue || showTakenDownOnlyValue;
+  if (anyFilterActive) {
+    filteredEntries = dmcaEntries.filter(e => {
+      const isPending = !e.filedDate && !e.takenDownDate;
+      const isFiled = e.filedDate && !e.takenDownDate;
+      const isTakenDown = !!e.takenDownDate;
+      
+      return (showPendingOnlyValue && isPending) || 
+             (showFiledOnlyValue && isFiled) || 
+             (showTakenDownOnlyValue && isTakenDown);
+    });
   }
 
   filteredEntries = [...filteredEntries].sort((a, b) => {
@@ -1160,7 +1181,16 @@ function renderDmcaManager() {
   });
 
   dmcaManagerList.querySelectorAll(".dmca-file-btn").forEach(btn => {
-    btn.addEventListener("click", () => openDmcaForm(btn.dataset.workshopid));
+    btn.addEventListener("click", () => {
+      // Show temporary "File..." state
+      const originalText = btn.textContent;
+      btn.textContent = "File...";
+      btn.classList.add("filing");
+      
+      // Open the form
+      openDmcaForm(btn.dataset.workshopid);
+      
+    });
   });
 
   dmcaManagerList.querySelectorAll(".dmca-filed-btn").forEach(btn => {
@@ -1569,36 +1599,18 @@ importDmcaBtn.addEventListener("click", importDmcaList);
 recheckFiledBtn.addEventListener("click", recheckFiledItems);
 
 showPendingOnlyCheckbox.addEventListener("change", () => {
-  if (showPendingOnlyCheckbox.checked) {
-    showFiledOnlyCheckbox.checked = false;
-    showTakenDownOnlyCheckbox.checked = false;
-    showFiledOnly = false;
-    showTakenDownOnly = false;
-  }
   showPendingOnly = showPendingOnlyCheckbox.checked;
   saveActiveProfile();
   renderDmcaManager();
 });
 
 showFiledOnlyCheckbox.addEventListener("change", () => {
-  if (showFiledOnlyCheckbox.checked) {
-    showPendingOnlyCheckbox.checked = false;
-    showTakenDownOnlyCheckbox.checked = false;
-    showPendingOnly = false;
-    showTakenDownOnly = false;
-  }
   showFiledOnly = showFiledOnlyCheckbox.checked;
   saveActiveProfile();
   renderDmcaManager();
 });
 
 showTakenDownOnlyCheckbox.addEventListener("change", () => {
-  if (showTakenDownOnlyCheckbox.checked) {
-    showPendingOnlyCheckbox.checked = false;
-    showFiledOnlyCheckbox.checked = false;
-    showPendingOnly = false;
-    showFiledOnly = false;
-  }
   showTakenDownOnly = showTakenDownOnlyCheckbox.checked;
   saveActiveProfile();
   renderDmcaManager();
@@ -1641,6 +1653,7 @@ setupHoldButton(clearDmcaBtn, DELETE_ALL_HOLD_TIME, "Clear All", clearDmcaList);
 filterUnapprovedCheckbox.addEventListener("change", (e) => {
   filterUnapproved = e.target.checked;
   saveActiveProfile();
+  refreshResultsBadges();
   applyResultsFilters();
 });
 
@@ -1894,4 +1907,25 @@ if (configDepotBtn) {
   } else {
     console.log("DepotDownloader configured:", config.path);
   }
+})();
+
+// Legal Notice collapse functionality
+(function initLegalNotice() {
+  const legalNotice = document.getElementById("legalNotice");
+  const legalNoticeToggle = document.getElementById("legalNoticeToggle");
+  
+  if (!legalNotice || !legalNoticeToggle) return;
+  
+  // Load saved state (default is expanded/not collapsed)
+  const isCollapsed = localStorage.getItem(LS_LEGAL_NOTICE_COLLAPSED) === "true";
+  if (isCollapsed) {
+    legalNotice.classList.add("collapsed");
+  }
+  
+  // Toggle on click
+  legalNoticeToggle.addEventListener("click", () => {
+    legalNotice.classList.toggle("collapsed");
+    const nowCollapsed = legalNotice.classList.contains("collapsed");
+    localStorage.setItem(LS_LEGAL_NOTICE_COLLAPSED, nowCollapsed);
+  });
 })();
