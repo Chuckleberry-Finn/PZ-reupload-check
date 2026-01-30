@@ -60,6 +60,103 @@ let showTakenDownOnly = false;
 const SINGLE_DELETE_HOLD_TIME = 330;
 const DELETE_ALL_HOLD_TIME = 1000;
 
+// ============================================================================
+// STEAM RATE LIMITER
+// Enforces delays between requests and handles rate limit retries
+// ============================================================================
+const SteamRateLimiter = {
+  REQUEST_DELAY: 2000,        // 2 seconds between consecutive requests
+  INITIAL_RETRY_DELAY: 5000,  // 5 seconds on first rate limit
+  SUBSEQUENT_RETRY_DELAY: 10000, // 10 seconds for subsequent retries
+  MAX_RETRIES: 5,             // Maximum retry attempts
+  
+  lastRequestTime: 0,
+  requestQueue: [],
+  isProcessing: false,
+  
+  // Wait for the required delay between requests
+  async waitForNextSlot() {
+    const now = Date.now();
+    const timeSinceLastRequest = now - this.lastRequestTime;
+    
+    if (timeSinceLastRequest < this.REQUEST_DELAY) {
+      const waitTime = this.REQUEST_DELAY - timeSinceLastRequest;
+      await new Promise(resolve => setTimeout(resolve, waitTime));
+    }
+    
+    this.lastRequestTime = Date.now();
+  },
+  
+  // Execute a fetch with rate limit handling and retries
+  async fetchWithRateLimit(url, options = {}) {
+    await this.waitForNextSlot();
+    
+    let retryCount = 0;
+    let lastError = null;
+    
+    while (retryCount <= this.MAX_RETRIES) {
+      try {
+        const resp = await fetch(url, options);
+        
+        // Check for rate limiting
+        if (resp.status === 429 || resp.status === 403) {
+          retryCount++;
+          
+          if (retryCount > this.MAX_RETRIES) {
+            const errorMsg = `Steam rate limit: Max retries (${this.MAX_RETRIES}) exceeded. Please wait a few minutes and try again.`;
+            setStatus(`${errorMsg}`);
+            throw new Error(errorMsg);
+          }
+          
+          // Calculate retry delay
+          const retryDelay = retryCount === 1 ? this.INITIAL_RETRY_DELAY : this.SUBSEQUENT_RETRY_DELAY;
+          const retrySeconds = retryDelay / 1000;
+          
+          setStatus(`Rate limited by Steam. Retry ${retryCount}/${this.MAX_RETRIES} in ${retrySeconds}s...`);
+          console.warn(`[RateLimiter] Rate limited (${resp.status}). Retry ${retryCount}/${this.MAX_RETRIES} in ${retrySeconds}s`);
+          
+          await new Promise(resolve => setTimeout(resolve, retryDelay));
+          this.lastRequestTime = Date.now(); // Reset timing after wait
+          continue;
+        }
+        
+        return resp;
+        
+      } catch (error) {
+        // Network errors - not rate limiting
+        if (error.message && error.message.includes('rate limit')) {
+          throw error; // Re-throw rate limit errors
+        }
+        
+        retryCount++;
+        lastError = error;
+        
+        if (retryCount > this.MAX_RETRIES) {
+          const errorMsg = `Request failed after ${this.MAX_RETRIES} retries: ${error.message}`;
+          setStatus(`${errorMsg}`);
+          throw new Error(errorMsg);
+        }
+        
+        const retryDelay = retryCount === 1 ? this.INITIAL_RETRY_DELAY : this.SUBSEQUENT_RETRY_DELAY;
+        const retrySeconds = retryDelay / 1000;
+        
+        setStatus(`Request error. Retry ${retryCount}/${this.MAX_RETRIES} in ${retrySeconds}s...`);
+        console.warn(`[RateLimiter] Error: ${error.message}. Retry ${retryCount}/${this.MAX_RETRIES} in ${retrySeconds}s`);
+        
+        await new Promise(resolve => setTimeout(resolve, retryDelay));
+        this.lastRequestTime = Date.now();
+      }
+    }
+    
+    throw lastError || new Error('Request failed after max retries');
+  },
+  
+  // Reset the rate limiter state (e.g., when starting a new batch)
+  reset() {
+    this.lastRequestTime = 0;
+  }
+};
+
 function escapeHtml(s) {
   return String(s)
     .replaceAll("&", "&amp;")
@@ -492,7 +589,9 @@ function setStatus(msg) {
 }
 
 async function fetchAllForModId(modId, maxPages) {
-  const resp = await fetch(`/api/modid-search-all?modId=${encodeURIComponent(modId)}&maxPages=${encodeURIComponent(maxPages)}`);
+  const resp = await SteamRateLimiter.fetchWithRateLimit(
+    `/api/modid-search-all?modId=${encodeURIComponent(modId)}&maxPages=${encodeURIComponent(maxPages)}`
+  );
   const text = await resp.text();
   let data;
   try {
@@ -826,6 +925,10 @@ async function renderResults() {
   }
 
   setStatus(`Searching ${activeMods.length} mod(s)...`);
+  SteamRateLimiter.reset(); // Reset rate limiter for fresh batch
+  
+  let completedCount = 0;
+  let errorCount = 0;
 
   for (let i = 0; i < activeMods.length; i++) {
     const mod = activeMods[i];
@@ -846,14 +949,28 @@ async function renderResults() {
       searchResults[mod.id] = { ...data, mod, searchDate };
       saveData();
       renderModGroup(group, mod, searchResults[mod.id]);
+      completedCount++;
     } catch (err) {
       group.querySelector(".group-header h3").innerHTML = `<code>${escapeHtml(modId)}</code><span class="badge">Error</span>`;
       group.querySelector(".group-content").innerHTML = `<div class="meta">${escapeHtml(err.message || String(err))}</div>`;
+      errorCount++;
+      
+      // If it's a rate limit error that exceeded retries, stop the batch
+      if (err.message && err.message.includes('rate limit')) {
+        setStatus(`Stopped due to rate limiting. Searched ${completedCount}/${activeMods.length} mod(s).`);
+        break;
+      }
     }
   }
 
   saveSearchResults();
-  setStatus(`Done. Searched ${activeMods.length} mod(s).`);
+  
+  if (errorCount === 0) {
+    setStatus(`Done. Searched ${activeMods.length} mod(s).`);
+  } else {
+    setStatus(`Done. Searched ${completedCount}/${activeMods.length} mod(s). ${errorCount} error(s).`);
+  }
+  
   renderTrackedList();
   updateStats();
   applyResultsFilters();
@@ -1349,6 +1466,7 @@ async function recheckFiledItems() {
   }
 
   setStatus(`Re-checking ${filedEntries.length} filed item(s)...`);
+  SteamRateLimiter.reset(); // Reset rate limiter for fresh batch
 
   let checkedCount = 0;
   let takenDownCount = 0;
@@ -1360,14 +1478,9 @@ async function recheckFiledItems() {
     setStatus(`Checking ${i + 1}/${filedEntries.length}: ${entry.title}...`);
 
     try {
-      const resp = await fetch(`/api/check-workshop-exists?workshopId=${entry.workshopId}`);
-
-      if (resp.status === 429) {
-        setStatus(`Rate limited. Waiting 10 seconds...`);
-        await new Promise(resolve => setTimeout(resolve, 10000));
-        i--;
-        continue;
-      }
+      const resp = await SteamRateLimiter.fetchWithRateLimit(
+        `/api/check-workshop-exists?workshopId=${entry.workshopId}`
+      );
 
       const data = await resp.json();
 
@@ -1382,11 +1495,15 @@ async function recheckFiledItems() {
 
       checkedCount++;
 
-      await new Promise(resolve => setTimeout(resolve, 750));
-
     } catch (err) {
       console.error(`Error checking ${entry.workshopId}:`, err);
       errorCount++;
+      
+      // If it's a rate limit error that exceeded retries, stop the batch
+      if (err.message && err.message.includes('rate limit')) {
+        setStatus(`Stopped due to rate limiting. Checked ${checkedCount} items before stopping.`);
+        break;
+      }
     }
   }
 
@@ -1445,9 +1562,12 @@ async function importFromProfile() {
   if (!profileInput || !profileInput.trim()) return;
 
   setStatus("Fetching workshop items from profile...");
+  SteamRateLimiter.reset(); // Reset rate limiter for fresh batch
 
   try {
-    const resp = await fetch(`/api/profile-workshop?profileId=${encodeURIComponent(profileInput.trim())}&maxPages=20`);
+    const resp = await SteamRateLimiter.fetchWithRateLimit(
+      `/api/profile-workshop?profileId=${encodeURIComponent(profileInput.trim())}&maxPages=20`
+    );
     const text = await resp.text();
     let data;
     try { data = JSON.parse(text); } catch (e) { throw new Error("Server returned invalid JSON. This might be a Steam rate limit."); }
@@ -1465,14 +1585,9 @@ async function importFromProfile() {
       if (trackedMods.some(m => m.workshopId === item.workshopId)) { alreadyTracked++; continue; }
 
       try {
-        const detailResp = await fetch(`/api/workshop-details?workshopId=${item.workshopId}`);
-        if (detailResp.status === 429) {
-          rateLimitHit = true;
-          setStatus(`Rate limited. Waiting 10 seconds before retrying...`);
-          await new Promise(resolve => setTimeout(resolve, 10000));
-          i--;
-          continue;
-        }
+        const detailResp = await SteamRateLimiter.fetchWithRateLimit(
+          `/api/workshop-details?workshopId=${item.workshopId}`
+        );
         const detailData = await detailResp.json();
         if (detailData.modId) {
           if (trackedMods.some(m => m.modId === detailData.modId)) { alreadyTracked++; }
@@ -1481,15 +1596,24 @@ async function importFromProfile() {
             imported++;
           }
         } else { skipped++; }
-        await new Promise(resolve => setTimeout(resolve, 300));
-      } catch (err) { console.error(`Failed to fetch details for ${item.workshopId}:`, err); skipped++; }
+      } catch (err) { 
+        console.error(`Failed to fetch details for ${item.workshopId}:`, err); 
+        skipped++;
+        
+        // If it's a rate limit error that exceeded retries, stop the batch
+        if (err.message && err.message.includes('rate limit')) {
+          rateLimitHit = true;
+          setStatus(`Stopped due to rate limiting. Processed ${i + 1}/${data.items.length} items.`);
+          break;
+        }
+      }
     }
 
     saveData();
     renderTrackedList();
     updateStats();
     let statusMessage = `Import complete! Imported: ${imported} new mods, Already tracked: ${alreadyTracked}, Skipped: ${skipped}, Total: ${data.count} items`;
-    if (rateLimitHit) statusMessage += ` - Rate limiting occurred, some requests were delayed`;
+    if (rateLimitHit) statusMessage += ` - Stopped early due to rate limiting`;
     setStatus(statusMessage);
   } catch (err) {
     setStatus(`Error importing from profile: ${err.message}`);
@@ -1900,7 +2024,7 @@ if (configDepotBtn) {
     console.warn("DepotDownloader not configured - verification will not work");
     // Optionally show a non-intrusive notification
     if (verifyDmcaBtn) {
-      verifyDmcaBtn.title = "⚠ DepotDownloader not configured - click to configure";
+      verifyDmcaBtn.title = "DepotDownloader not configured - click to configure";
     }
   } else {
     console.log("DepotDownloader configured:", config.path);
