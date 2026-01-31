@@ -680,18 +680,42 @@ async function promptDepotDownloaderPath() {
 function updateStats() {
   const totalMods = trackedMods.length;
   const activeMods = trackedMods.filter(m => m.modId.trim()).length;
-  let totalResults = 0, totalApproved = 0, totalOriginal = 0, totalUnapproved = 0;
+  const workshopStatus = new Map();
 
   Object.values(searchResults).forEach(result => {
     if (result && result.items) {
       result.items.forEach(item => {
         const wid = String(item.workshopId || "").trim();
-        totalResults++;
-        if (isOriginal(result.mod, wid)) totalOriginal++;
-        else if (getApprovedSet(result.mod).has(wid)) totalApproved++;
-        else totalUnapproved++;
+        if (!wid) return;
+        
+        const currentStatus = workshopStatus.get(wid);
+        
+        if (isOriginal(result.mod, wid)) {
+          // Original is highest priority
+          workshopStatus.set(wid, 'original');
+        } else if (getApprovedSet(result.mod).has(wid)) {
+          // Approved only if not already original
+          if (currentStatus !== 'original') {
+            workshopStatus.set(wid, 'approved');
+          }
+        } else {
+          // Unapproved only if no status yet
+          if (!currentStatus) {
+            workshopStatus.set(wid, 'unapproved');
+          }
+        }
       });
     }
+  });
+
+  // Count unique items by status
+  let totalResults = workshopStatus.size;
+  let totalOriginal = 0, totalApproved = 0, totalUnapproved = 0;
+  
+  workshopStatus.forEach(status => {
+    if (status === 'original') totalOriginal++;
+    else if (status === 'approved') totalApproved++;
+    else totalUnapproved++;
   });
 
   statsBarEl.innerHTML = `
