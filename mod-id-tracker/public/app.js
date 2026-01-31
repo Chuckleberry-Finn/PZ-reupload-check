@@ -65,9 +65,9 @@ const DELETE_ALL_HOLD_TIME = 1000;
 // Enforces delays between requests and handles rate limit retries
 // ============================================================================
 const SteamRateLimiter = {
-  REQUEST_DELAY: 2000,        // 2 seconds between consecutive requests
-  INITIAL_RETRY_DELAY: 5000,  // 5 seconds on first rate limit
-  SUBSEQUENT_RETRY_DELAY: 10000, // 10 seconds for subsequent retries
+  REQUEST_DELAY: 3500,        // 3.5 seconds between consecutive requests
+  INITIAL_RETRY_DELAY: 6000,  // 6 seconds on first rate limit
+  SUBSEQUENT_RETRY_DELAY: 15000, // 15 seconds for subsequent retries
   MAX_RETRIES: 5,             // Maximum retry attempts
   
   lastRequestTime: 0,
