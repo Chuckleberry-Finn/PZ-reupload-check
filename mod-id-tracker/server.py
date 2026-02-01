@@ -233,8 +233,9 @@ def extract_mod_id(workshop_id: str):
             # Look for "Mod ID: xxxxx" pattern in description
             patterns = [
                 r'Mod ID:\s*([A-Za-z0-9_\-]+)',
-                r'ModID:\s*([A-Za-z0-9_\-]+)',
-                r'mod\s*id:\s*([A-Za-z0-9_\-]+)',
+                r'Mod ID:\s*([A-Za-z0-9_\-\s]+?)(?:\s*(?:<|[\r\n]|$))',
+                r'ModID:\s*([A-Za-z0-9_\-\s]+?)(?:\s*(?:<|[\r\n]|$))',
+                r'mod\s*id:\s*([A-Za-z0-9_\-\s]+?)(?:\s*(?:<|[\r\n]|$))',
             ]
 
             for pattern in patterns:
