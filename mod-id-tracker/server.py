@@ -15,6 +15,92 @@ from datetime import datetime
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from socketserver import ThreadingMixIn
 from threading import Thread, Lock
+from collections import deque
+
+# ============================================================================
+# STEAM RATE LIMITER
+# Dynamically throttles requests to stay under Steam's rate limits
+# ============================================================================
+class SteamRateLimiter:
+    """
+    Rate limiter that tracks requests per minute and enforces delays.
+    Steam's rate limits are not publicly documented, but appear to be:
+    - ~10-15 requests per minute for workshop searches
+    - Stricter limits during peak hours or if recently rate-limited
+    """
+    
+    def __init__(self, max_requests_per_minute=10, min_delay_seconds=4.0):
+        self.max_rpm = max_requests_per_minute
+        self.min_delay = min_delay_seconds
+        self.request_times = deque(maxlen=100)  # Track last 100 requests
+        self.lock = Lock()
+        self.backoff_multiplier = 1.0
+        self.last_rate_limit_time = 0
+        
+    def wait_if_needed(self):
+        """Wait if necessary to stay under rate limits"""
+        with self.lock:
+            now = time.time()
+            
+            # Remove requests older than 60 seconds
+            cutoff = now - 60
+            while self.request_times and self.request_times[0] < cutoff:
+                self.request_times.popleft()
+            
+            # Check if we've hit rate limits recently (within last 5 minutes)
+            if now - self.last_rate_limit_time < 300:  # 5 minutes
+                # Apply backoff: reduce to 70% of normal rate
+                effective_max = int(self.max_rpm * 0.7)
+            else:
+                effective_max = self.max_rpm
+            
+            # If we're at the limit, calculate how long to wait
+            if len(self.request_times) >= effective_max:
+                oldest = self.request_times[0]
+                wait_until = oldest + 60
+                wait_time = max(0, wait_until - now)
+                
+                if wait_time > 0:
+                    print(f"[RateLimiter] Reached {len(self.request_times)} requests/min limit. Waiting {wait_time:.1f}s...")
+                    time.sleep(wait_time)
+                    now = time.time()
+            
+            # Apply minimum delay between requests
+            if self.request_times:
+                time_since_last = now - self.request_times[-1]
+                adjusted_delay = self.min_delay * self.backoff_multiplier
+                
+                if time_since_last < adjusted_delay:
+                    wait_time = adjusted_delay - time_since_last
+                    print(f"[RateLimiter] Minimum delay: waiting {wait_time:.1f}s...")
+                    time.sleep(wait_time)
+                    now = time.time()
+            
+            # Record this request
+            self.request_times.append(now)
+            
+            # Show current rate for monitoring
+            rpm = len(self.request_times)
+            print(f"[RateLimiter] Request sent. Current rate: {rpm} requests/min (limit: {effective_max})")
+    
+    def mark_rate_limited(self):
+        """Call this when a 403/429 error occurs to increase backoff"""
+        with self.lock:
+            self.last_rate_limit_time = time.time()
+            self.backoff_multiplier = min(2.0, self.backoff_multiplier * 1.5)
+            print(f"[RateLimiter] Rate limited! Increasing backoff to {self.backoff_multiplier:.2f}x")
+    
+    def reset_backoff(self):
+        """Reset backoff after successful requests"""
+        with self.lock:
+            if self.backoff_multiplier > 1.0:
+                self.backoff_multiplier = max(1.0, self.backoff_multiplier * 0.9)
+
+# Global rate limiter instance
+steam_rate_limiter = SteamRateLimiter(
+    max_requests_per_minute=10,  # Conservative limit
+    min_delay_seconds=4.0         # 4 seconds between requests
+)
 
 # Paths / constants
 PZ_APP_ID = "108600"
@@ -87,7 +173,10 @@ def set_depotdownloader_path(path_str: str):
 
 # Existing search endpoints
 def fetch_url(url: str, timeout: int = 15, max_retries: int = 2):
-    """Fetch URL with retry logic"""
+    """Fetch URL with retry logic and rate limiting"""
+    # Apply rate limiting before the request
+    steam_rate_limiter.wait_if_needed()
+    
     for attempt in range(max_retries):
         try:
             req = urllib.request.Request(url, headers={
@@ -104,9 +193,13 @@ def fetch_url(url: str, timeout: int = 15, max_retries: int = 2):
                 if response.headers.get('Content-Encoding') == 'gzip':
                     import gzip
                     content = gzip.decompress(content)
+                
+                # Reset backoff on successful request
+                steam_rate_limiter.reset_backoff()
                 return content.decode("utf-8", errors="ignore"), 200, None
         except urllib.error.HTTPError as e:
             if e.code in (403, 429):
+                steam_rate_limiter.mark_rate_limited()
                 print(f"[Fetch] HTTP {e.code} (rate limit or blocked)")
                 return None, e.code, str(e.reason)
             if attempt < max_retries - 1:
@@ -185,10 +278,8 @@ def search_workshop(mod_id: str, max_pages: int = 5):
             if consecutive_empty >= max_consecutive_empty:
                 print(f"[Search] Stopping search - no results on last {consecutive_empty} pages")
                 break
-
-        delay = 0.5 if page_found > 0 else 0.3
-        if page < max_pages:
-            time.sleep(delay)
+        
+        # Rate limiter handles delays automatically
 
     print(f"[Search] Complete - found {len(results)} total items for '{mod_id}'")
     return results, None
@@ -232,7 +323,6 @@ def extract_mod_id(workshop_id: str):
 
             # Look for "Mod ID: xxxxx" pattern in description
             patterns = [
-                r'Mod ID:\s*([A-Za-z0-9_\-]+)',
                 r'Mod ID:\s*([A-Za-z0-9_\-\s]+?)(?:\s*(?:<|[\r\n]|$))',
                 r'ModID:\s*([A-Za-z0-9_\-\s]+?)(?:\s*(?:<|[\r\n]|$))',
                 r'mod\s*id:\s*([A-Za-z0-9_\-\s]+?)(?:\s*(?:<|[\r\n]|$))',
@@ -328,10 +418,7 @@ def search_profile_workshop(profile_input: str, max_pages: int = 10):
         if page_found == 0:
             break
 
-        # Normal delay between successful requests
-        if page < max_pages:
-            time.sleep(0.5)
-
+        # Rate limiter handles delays automatically
         page += 1
 
     print(f"[Profile] Complete - found {len(results)} total items from profile")
