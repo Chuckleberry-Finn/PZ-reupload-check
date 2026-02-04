@@ -6,6 +6,7 @@ const LS_PROFILES = "profiles_v1";
 const LS_ACTIVE_PROFILE = "active_profile_v1";
 const LS_LEGAL_NOTICE_COLLAPSED = "legal_notice_collapsed_v1";
 const DEFAULT_PROFILE_NAME = "Default Profile";
+const LS_MANUAL_MODS = "manual_mods_v1";
 
 const trackedListEl = document.getElementById("trackedList");
 const statsBarEl = document.getElementById("statsBar");
@@ -56,9 +57,452 @@ let activeProfileId = null;
 let showPendingOnly = false;
 let showFiledOnly = false;
 let showTakenDownOnly = false;
+let manualMods = [];
 
 const SINGLE_DELETE_HOLD_TIME = 330;
 const DELETE_ALL_HOLD_TIME = 1000;
+
+// ============================================================================
+// TASK QUEUE SYSTEM
+// Queue and process searches, verifications, and other async operations
+// ============================================================================
+const TaskQueue = {
+  queue: [],
+  isProcessing: false,
+  isPaused: false,
+  currentTask: null,
+  
+  // Task types
+  TYPES: {
+    SEARCH_SINGLE: 'search_single',
+    SEARCH_ALL: 'search_all',
+    VERIFY_SINGLE: 'verify_single',
+    VERIFY_ALL: 'verify_all',
+    RECHECK_FILED: 'recheck_filed',
+    IMPORT_PROFILE: 'import_profile',
+    ADD_MANUAL: 'add_manual'
+  },
+  
+  // Add a task to the queue
+  add(type, params, description) {
+    // Check for duplicate tasks
+    const isDuplicate = this.queue.some(task => 
+      task.type === type && JSON.stringify(task.params) === JSON.stringify(params)
+    ) || (this.currentTask && this.currentTask.type === type && 
+          JSON.stringify(this.currentTask.params) === JSON.stringify(params));
+    
+    if (isDuplicate) {
+      setStatus(`Task already queued: ${description}`);
+      return false;
+    }
+    
+    const task = {
+      id: `task_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
+      type,
+      params,
+      description,
+      addedAt: new Date()
+    };
+    
+    this.queue.push(task);
+    this.updateUI();
+    
+    if (!this.isProcessing && !this.isPaused) {
+      this.processNext();
+    }
+    
+    return true;
+  },
+  
+  // Process the next task in queue
+  async processNext() {
+    if (this.isPaused || this.queue.length === 0) {
+      this.isProcessing = false;
+      this.currentTask = null;
+      this.updateUI();
+      return;
+    }
+    
+    this.isProcessing = true;
+    this.currentTask = this.queue.shift();
+    this.updateUI();
+    
+    try {
+      await this.executeTask(this.currentTask);
+    } catch (err) {
+      console.error('Task failed:', err);
+      setStatus(`Task failed: ${err.message}`);
+    }
+    
+    this.currentTask = null;
+    
+    // Small delay between tasks to prevent overwhelming
+    await new Promise(r => setTimeout(r, 300));
+    
+    this.processNext();
+  },
+  
+  // Execute a specific task
+  async executeTask(task) {
+    switch (task.type) {
+      case this.TYPES.SEARCH_SINGLE:
+        await this.executeSearchSingle(task.params);
+        break;
+      case this.TYPES.SEARCH_ALL:
+        await this.executeSearchAll(task.params);
+        break;
+      case this.TYPES.VERIFY_SINGLE:
+        await this.executeVerifySingle(task.params);
+        break;
+      case this.TYPES.VERIFY_ALL:
+        await this.executeVerifyAll(task.params);
+        break;
+      case this.TYPES.RECHECK_FILED:
+        await this.executeRecheckFiled(task.params);
+        break;
+      case this.TYPES.ADD_MANUAL:
+        await this.executeAddManual(task.params);
+        break;
+      default:
+        console.warn('Unknown task type:', task.type);
+    }
+  },
+  
+  // Search single mod
+  async executeSearchSingle(params) {
+    const { mod } = params;
+    const modId = mod.modId.trim();
+    setStatus(`[Queue] Searching "${modId}"...`);
+    
+    try {
+      const data = await fetchAllForModId(modId, 50);
+      const searchDate = new Date().toISOString();
+      mod.lastSearch = searchDate;
+      searchResults[mod.id] = { ...data, mod, searchDate };
+      saveData();
+      saveSearchResults();
+      renderTrackedList();
+      
+      let group = document.querySelector(`.group[data-modid="${modId}"]`);
+      if (!group) {
+        group = document.createElement("div");
+        group.className = collapsedGroups.has(modId) ? "group collapsed" : "group";
+        group.dataset.modid = modId;
+        group.innerHTML = `<div class="group-header"><span class="collapse-icon">▼</span><h3></h3></div><div class="group-content"></div>`;
+        resultsEl.appendChild(group);
+        group.querySelector(".group-header").addEventListener("click", () => toggleCollapse(modId));
+      }
+      
+      renderModGroup(group, mod, searchResults[mod.id]);
+      updateStats();
+      updateDmcaCounts();
+      setStatus(`[Queue] Found ${data.count} result(s) for "${modId}"`);
+    } catch (err) {
+      setStatus(`[Queue] Error searching "${modId}": ${err.message}`);
+      throw err;
+    }
+  },
+  
+  // Search all mods
+  async executeSearchAll(params) {
+    const activeMods = trackedMods.filter(m => m.modId.trim());
+    
+    if (activeMods.length === 0) {
+      setStatus("[Queue] No mods to search");
+      return;
+    }
+    
+    resultsEl.innerHTML = "";
+    setStatus(`[Queue] Searching ${activeMods.length} mod(s)...`);
+    SteamRateLimiter.reset();
+    
+    let completedCount = 0;
+    let errorCount = 0;
+    
+    for (let i = 0; i < activeMods.length; i++) {
+      if (this.isPaused) {
+        // Re-queue remaining mods
+        for (let j = i; j < activeMods.length; j++) {
+          this.queue.unshift({
+            id: `task_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
+            type: this.TYPES.SEARCH_SINGLE,
+            params: { mod: activeMods[j] },
+            description: `Search: ${activeMods[j].modId}`,
+            addedAt: new Date()
+          });
+        }
+        setStatus(`[Queue] Paused. ${activeMods.length - i} searches remaining in queue.`);
+        return;
+      }
+      
+      const mod = activeMods[i];
+      const modId = mod.modId.trim();
+      
+      const group = document.createElement("div");
+      group.className = collapsedGroups.has(modId) ? "group collapsed" : "group";
+      group.dataset.modid = modId;
+      group.innerHTML = `<div class="group-header"><span class="collapse-icon">▼</span><h3><code>${escapeHtml(modId)}</code><span class="badge">Loading...</span></h3></div><div class="group-content"></div>`;
+      resultsEl.appendChild(group);
+      group.querySelector(".group-header").addEventListener("click", () => toggleCollapse(modId));
+      
+      try {
+        setStatus(`[Queue] Searching ${i + 1}/${activeMods.length}: "${modId}"...`);
+        this.updateUI();
+        const data = await fetchAllForModId(modId, 50);
+        const searchDate = new Date().toISOString();
+        mod.lastSearch = searchDate;
+        searchResults[mod.id] = { ...data, mod, searchDate };
+        saveData();
+        renderModGroup(group, mod, searchResults[mod.id]);
+        completedCount++;
+      } catch (err) {
+        group.querySelector(".group-header h3").innerHTML = `<code>${escapeHtml(modId)}</code><span class="badge">Error</span>`;
+        group.querySelector(".group-content").innerHTML = `<div class="meta">${escapeHtml(err.message || String(err))}</div>`;
+        errorCount++;
+        
+        if (err.message && err.message.includes('rate limit')) {
+          setStatus(`[Queue] Stopped due to rate limiting. Searched ${completedCount}/${activeMods.length} mod(s).`);
+          break;
+        }
+      }
+    }
+    
+    saveSearchResults();
+    renderTrackedList();
+    updateStats();
+    applyResultsFilters();
+    
+    if (errorCount === 0) {
+      setStatus(`[Queue] Done. Searched ${activeMods.length} mod(s).`);
+    } else {
+      setStatus(`[Queue] Done. Searched ${completedCount}/${activeMods.length} mod(s). ${errorCount} error(s).`);
+    }
+  },
+  
+  // Verify single DMCA entry
+  async executeVerifySingle(params) {
+    const { workshopId } = params;
+    const entry = dmcaEntries.find(e => e.workshopId === workshopId);
+    
+    if (!entry) {
+      setStatus('[Queue] Entry not found');
+      return;
+    }
+    
+    const config = await checkDepotDownloaderConfig();
+    if (!config.configured) {
+      setStatus('[Queue] DepotDownloader not configured - skipping verification');
+      return;
+    }
+    
+    setStatus(`[Queue] Verifying ${entry.title}...`);
+    
+    // Filter out pseudo-mods like "Manual Additions (Unassociated)"
+    const realTrackedMods = trackedMods.filter(m => m.modId && !m.modId.startsWith('Manual Additions'));
+    
+    try {
+      const resp = await fetch('/api/verify-single', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ entry, trackedMods: realTrackedMods })
+      });
+      
+      const data = await resp.json();
+      
+      if (!resp.ok) {
+        throw new Error(data.error || 'Verification failed');
+      }
+      
+      entry.verification = data.verification;
+      saveDmcaEntries();
+      renderDmcaManager();
+      updateDmcaCounts();
+      
+      if (data.verification.verified) {
+        const pct = data.verification.matchPercentage || 0;
+        setStatus(`[Queue] Verification complete: ${pct}% match for ${entry.title}`);
+      } else if (data.verification.takenDown) {
+        setStatus(`[Queue] ${entry.title} was taken down during verification`);
+      } else {
+        setStatus(`[Queue] Verification complete for ${entry.title}`);
+      }
+    } catch (err) {
+      setStatus(`[Queue] Verification failed: ${err.message}`);
+      throw err;
+    }
+  },
+  
+  // Verify all DMCA entries (placeholder - uses existing bulk verify)
+  async executeVerifyAll(params) {
+    // This triggers the existing verify process
+    setStatus('[Queue] Starting bulk verification...');
+    verifyDmcaBtn?.click();
+  },
+  
+  // Recheck filed items
+  async executeRecheckFiled(params) {
+    const filedEntries = dmcaEntries.filter(e => e.filedDate && !e.takenDownDate);
+    
+    if (filedEntries.length === 0) {
+      setStatus('[Queue] No filed entries to re-check');
+      return;
+    }
+    
+    setStatus(`[Queue] Re-checking ${filedEntries.length} filed entries...`);
+    let takenDownCount = 0;
+    
+    for (let i = 0; i < filedEntries.length; i++) {
+      if (this.isPaused) {
+        setStatus(`[Queue] Paused. ${filedEntries.length - i} re-checks remaining.`);
+        return;
+      }
+      
+      const entry = filedEntries[i];
+      setStatus(`[Queue] Checking ${i + 1}/${filedEntries.length}: ${entry.title}...`);
+      this.updateUI();
+      
+      try {
+        const resp = await SteamRateLimiter.fetchWithRateLimit(
+          `/api/check-workshop-exists?workshopId=${entry.workshopId}`
+        );
+        const data = await resp.json();
+        
+        if (!data.exists) {
+          entry.takenDownDate = new Date().toISOString();
+          takenDownCount++;
+        }
+      } catch (err) {
+        console.error(`Failed to check ${entry.workshopId}:`, err);
+      }
+    }
+    
+    saveDmcaEntries();
+    renderDmcaManager();
+    updateDmcaCounts();
+    setStatus(`[Queue] Re-check complete. ${takenDownCount} item(s) marked as taken down.`);
+  },
+  
+  // Add manual mod
+  async executeAddManual(params) {
+    const { workshopId } = params;
+    setStatus(`[Queue] Adding manual mod ${workshopId}...`);
+    
+    // This is handled by the modal form submission
+    // Just a placeholder for potential future use
+  },
+  
+  // Pause the queue
+  pause() {
+    this.isPaused = true;
+    this.updateUI();
+    setStatus('Queue paused');
+  },
+  
+  // Resume the queue
+  resume() {
+    this.isPaused = false;
+    this.updateUI();
+    if (this.queue.length > 0 && !this.isProcessing) {
+      this.processNext();
+    }
+    setStatus('Queue resumed');
+  },
+  
+  // Clear all queued tasks (doesn't stop current task)
+  clear() {
+    this.queue = [];
+    this.updateUI();
+    setStatus('Queue cleared');
+  },
+  
+  // Cancel current task and clear queue
+  cancelAll() {
+    this.isPaused = true;
+    this.queue = [];
+    this.updateUI();
+    setStatus('All tasks cancelled');
+  },
+  
+  // Get queue status
+  getStatus() {
+    return {
+      queueLength: this.queue.length,
+      isProcessing: this.isProcessing,
+      isPaused: this.isPaused,
+      currentTask: this.currentTask
+    };
+  },
+  
+  // Color map for task types
+  getTaskColor(type) {
+    const colors = {
+      [this.TYPES.SEARCH_SINGLE]: '#8b0000',   // Accent red
+      [this.TYPES.SEARCH_ALL]: '#8b0000',      // Accent red
+      [this.TYPES.VERIFY_SINGLE]: '#2196f3',   // Blue
+      [this.TYPES.VERIFY_ALL]: '#2196f3',      // Blue
+      [this.TYPES.RECHECK_FILED]: '#7b68ee',   // Medium slate blue
+      [this.TYPES.IMPORT_PROFILE]: '#2e7d32',  // Green
+      [this.TYPES.ADD_MANUAL]: '#ff6b35'       // Orange
+    };
+    return colors[type] || '#666';
+  },
+  
+  // Update the UI to reflect queue status
+  updateUI() {
+    // Ensure status bar has the queue container
+    if (!statusEl) return;
+    
+    let queueContainer = document.getElementById('queueTallyContainer');
+    if (!queueContainer) {
+      queueContainer = document.createElement('div');
+      queueContainer.id = 'queueTallyContainer';
+      queueContainer.className = 'queue-tally-container';
+      statusEl.insertBefore(queueContainer, statusEl.firstChild);
+    }
+    
+    // Build tally marks for current task + queued tasks
+    const allTasks = [];
+    if (this.currentTask) {
+      allTasks.push({ ...this.currentTask, isCurrent: true });
+    }
+    allTasks.push(...this.queue);
+    
+    // Calculate tally width (max 8px, shrink if needed)
+    const maxWidth = 8;
+    const containerWidth = 120; // Max container width
+    const gap = 2;
+    const tallyWidth = allTasks.length > 0 
+      ? Math.min(maxWidth, Math.max(3, (containerWidth - (allTasks.length - 1) * gap) / allTasks.length))
+      : maxWidth;
+    
+    if (allTasks.length === 0) {
+      queueContainer.innerHTML = '';
+      queueContainer.classList.remove('visible');
+      statusEl.classList.remove('status-with-queue');
+    } else {
+      statusEl.classList.add('status-with-queue');
+      const talliesHtml = allTasks.map((task, idx) => {
+        const color = this.getTaskColor(task.type);
+        const isPaused = this.isPaused;
+        const isCurrent = task.isCurrent;
+        const pulseClass = isCurrent && !isPaused ? 'pulsing' : '';
+        const pausedClass = isPaused ? 'paused' : '';
+        
+        return `<div class="queue-tally ${pulseClass} ${pausedClass}" 
+                     style="background-color: ${color}; width: ${tallyWidth}px;" 
+                     title="${escapeHtml(task.description)}${isCurrent ? ' (running)' : ''}"></div>`;
+      }).join('');
+      
+      queueContainer.innerHTML = talliesHtml;
+      queueContainer.classList.add('visible');
+    }
+    
+    // Update status text to show current task
+    if (this.isPaused && allTasks.length > 0) {
+      setStatus(`⏸ Queue paused (${allTasks.length} task${allTasks.length !== 1 ? 's' : ''} waiting)`);
+    }
+  }
+};
 
 // ============================================================================
 // STEAM RATE LIMITER
@@ -164,6 +608,246 @@ function escapeHtml(s) {
     .replaceAll(">", "&gt;")
     .replaceAll('"', "&quot;")
     .replaceAll("'", "&#039;");
+}
+
+// ============================================================================
+// UNIFIED MODAL SYSTEM
+// Dark-themed modals to replace browser's native dialogs
+// ============================================================================
+
+const ModalSystem = {
+  activeModal: null,
+  resolveCallback: null,
+  
+  // Create the modal container if it doesn't exist
+  getContainer() {
+    let container = document.getElementById('modalSystemContainer');
+    if (!container) {
+      container = document.createElement('div');
+      container.id = 'modalSystemContainer';
+      document.body.appendChild(container);
+    }
+    return container;
+  },
+  
+  // Show an alert modal (just OK button)
+  alert(title, message, type = 'info') {
+    return new Promise((resolve) => {
+      this.show({
+        title,
+        message,
+        type,
+        buttons: [
+          { text: 'OK', primary: true, action: () => resolve(true) }
+        ]
+      });
+    });
+  },
+  
+  // Show a confirm modal (OK/Cancel buttons)
+  confirm(title, message, options = {}) {
+    const confirmText = options.confirmText || 'Confirm';
+    const cancelText = options.cancelText || 'Cancel';
+    const type = options.type || 'warning';
+    
+    return new Promise((resolve) => {
+      this.show({
+        title,
+        message,
+        type,
+        buttons: [
+          { text: cancelText, primary: false, action: () => resolve(false) },
+          { text: confirmText, primary: true, danger: options.danger, action: () => resolve(true) }
+        ]
+      });
+    });
+  },
+  
+  // Show a prompt modal (input field)
+  prompt(title, message, options = {}) {
+    const placeholder = options.placeholder || '';
+    const defaultValue = options.defaultValue || '';
+    const inputType = options.inputType || 'text';
+    const submitText = options.submitText || 'OK';
+    const cancelText = options.cancelText || 'Cancel';
+    const multiline = options.multiline || false;
+    
+    return new Promise((resolve) => {
+      this.show({
+        title,
+        message,
+        type: 'prompt',
+        input: { placeholder, defaultValue, inputType, multiline },
+        buttons: [
+          { text: cancelText, primary: false, action: () => resolve(null) },
+          { text: submitText, primary: true, action: (inputValue) => resolve(inputValue) }
+        ]
+      });
+    });
+  },
+  
+  // Core show function
+  show(config) {
+    this.close(); // Close any existing modal
+    
+    const container = this.getContainer();
+    const iconMap = {
+      'info': '&#9432;',
+      'success': '&#10004;',
+      'warning': '&#9888;',
+      'error': '&#10006;',
+      'prompt': '&#9998;'
+    };
+    
+    const colorMap = {
+      'info': '#2196f3',
+      'success': '#4caf50',
+      'warning': '#ff9800',
+      'error': '#f44336',
+      'prompt': '#9c27b0'
+    };
+    
+    const icon = iconMap[config.type] || iconMap['info'];
+    const color = colorMap[config.type] || colorMap['info'];
+    
+    let inputHtml = '';
+    if (config.input) {
+      if (config.input.multiline) {
+        inputHtml = `
+          <textarea 
+            id="modalInput" 
+            class="modal-input" 
+            placeholder="${escapeHtml(config.input.placeholder)}"
+            rows="4"
+          >${escapeHtml(config.input.defaultValue)}</textarea>
+        `;
+      } else {
+        inputHtml = `
+          <input 
+            type="${config.input.inputType}" 
+            id="modalInput" 
+            class="modal-input" 
+            placeholder="${escapeHtml(config.input.placeholder)}"
+            value="${escapeHtml(config.input.defaultValue)}"
+          />
+        `;
+      }
+    }
+    
+    const buttonsHtml = config.buttons.map((btn, idx) => {
+      let btnClass = 'modal-btn';
+      if (btn.primary) btnClass += ' modal-btn-primary';
+      if (btn.danger) btnClass += ' modal-btn-danger';
+      return `<button class="${btnClass}" data-btn-idx="${idx}">${escapeHtml(btn.text)}</button>`;
+    }).join('');
+    
+    // Format message - support line breaks
+    const formattedMessage = config.message ? config.message.replace(/\n/g, '<br>') : '';
+    
+    container.innerHTML = `
+      <div class="modal-overlay active" id="systemModal">
+        <div class="modal-content" style="max-width: 450px;">
+          <div class="modal-header">
+            <div class="modal-title-row">
+              <span class="modal-icon" style="color: ${color};">${icon}</span>
+              <h3>${escapeHtml(config.title)}</h3>
+            </div>
+            <button class="modal-close" id="modalCloseBtn">×</button>
+          </div>
+          <div class="modal-body">
+            ${formattedMessage ? `<p class="modal-message">${formattedMessage}</p>` : ''}
+            ${inputHtml}
+          </div>
+          <div class="modal-actions">
+            ${buttonsHtml}
+          </div>
+        </div>
+      </div>
+    `;
+    
+    this.activeModal = container.querySelector('#systemModal');
+    
+    // Focus input if present
+    const input = container.querySelector('#modalInput');
+    if (input) {
+      setTimeout(() => {
+        input.focus();
+        input.select();
+      }, 50);
+    }
+    
+    // Event handlers
+    const closeBtn = container.querySelector('#modalCloseBtn');
+    closeBtn.addEventListener('click', () => {
+      const cancelBtn = config.buttons.find(b => !b.primary);
+      if (cancelBtn) cancelBtn.action(null);
+      else this.close();
+    });
+    
+    // Button clicks
+    config.buttons.forEach((btn, idx) => {
+      const btnEl = container.querySelector(`[data-btn-idx="${idx}"]`);
+      btnEl.addEventListener('click', () => {
+        const inputValue = input ? input.value : null;
+        this.close();
+        btn.action(inputValue);
+      });
+    });
+    
+    // Click outside to close (cancel action)
+    this.activeModal.addEventListener('click', (e) => {
+      if (e.target === this.activeModal) {
+        const cancelBtn = config.buttons.find(b => !b.primary);
+        if (cancelBtn) cancelBtn.action(null);
+        else this.close();
+      }
+    });
+    
+    // Enter key submits, Escape cancels
+    const handleKeydown = (e) => {
+      if (e.key === 'Enter' && !config.input?.multiline) {
+        e.preventDefault();
+        const primaryBtn = config.buttons.find(b => b.primary);
+        if (primaryBtn) {
+          const inputValue = input ? input.value : null;
+          this.close();
+          primaryBtn.action(inputValue);
+        }
+      } else if (e.key === 'Escape') {
+        const cancelBtn = config.buttons.find(b => !b.primary);
+        if (cancelBtn) cancelBtn.action(null);
+        else this.close();
+      }
+    };
+    
+    document.addEventListener('keydown', handleKeydown);
+    this.activeModal._keydownHandler = handleKeydown;
+  },
+  
+  close() {
+    if (this.activeModal) {
+      if (this.activeModal._keydownHandler) {
+        document.removeEventListener('keydown', this.activeModal._keydownHandler);
+      }
+      this.activeModal.remove();
+      this.activeModal = null;
+    }
+    const container = document.getElementById('modalSystemContainer');
+    if (container) container.innerHTML = '';
+  }
+};
+
+// Convenience functions
+async function showAlert(title, message, type = 'info') {
+  return ModalSystem.alert(title, message, type);
+}
+
+async function showConfirm(title, message, options = {}) {
+  return ModalSystem.confirm(title, message, options);
+}
+
+async function showPrompt(title, message, options = {}) {
+  return ModalSystem.prompt(title, message, options);
 }
 
 function generateDmcaMessage(entry, trackedMods) {
@@ -333,6 +1017,37 @@ function saveData() {
   saveActiveProfile();
 }
 
+// ============================================================================
+// MANUAL MOD FUNCTIONS
+// ============================================================================
+
+function loadManualMods() {
+  try {
+    const stored = localStorage.getItem(LS_MANUAL_MODS);
+    if (stored) manualMods = JSON.parse(stored);
+  } catch (e) {
+    console.error('Failed to load manual mods:', e);
+    manualMods = [];
+  }
+}
+
+function saveManualMods() {
+  try {
+    localStorage.setItem(LS_MANUAL_MODS, JSON.stringify(manualMods));
+  } catch (e) {
+    console.error('Failed to save manual mods:', e);
+  }
+}
+
+function isManualMod(workshopId) {
+  return manualMods.some(m => m.workshopId === workshopId);
+}
+
+function getManualMod(workshopId) {
+  return manualMods.find(m => m.workshopId === workshopId);
+}
+
+
 function saveCollapsedState() {
   saveActiveProfile();
 }
@@ -375,36 +1090,42 @@ function switchProfile(profileId) {
 }
 
 function createNewProfile() {
-  const name = prompt("Enter a name for the new profile:");
-  if (!name || !name.trim()) return;
+  showPrompt('Create New Profile', 'Enter a name for the new profile:', {
+    placeholder: 'e.g., My Mods, Backup, Testing'
+  }).then(name => {
+    if (!name || !name.trim()) return;
 
-  const newId = generateId();
-  profiles[newId] = {
-    name: name.trim(),
-    mods: [],
-    dmca: [],
-    searchResults: {},
-    collapsed: []
-  };
+    const newId = generateId();
+    profiles[newId] = {
+      name: name.trim(),
+      mods: [],
+      dmca: [],
+      searchResults: {},
+      collapsed: []
+    };
 
-  saveProfiles();
-  switchProfile(newId);
-  setStatus(`Created new profile: ${name.trim()}`);
+    saveProfiles();
+    switchProfile(newId);
+    setStatus(`Created new profile: ${name.trim()}`);
+  });
 }
 
 function renameProfile() {
   if (!activeProfileId || !profiles[activeProfileId]) return;
 
   const currentName = profiles[activeProfileId].name;
-  const newName = prompt(`Rename profile "${currentName}" to:`, currentName);
+  showPrompt('Rename Profile', `Enter a new name for "${currentName}":`, {
+    defaultValue: currentName,
+    placeholder: 'New profile name'
+  }).then(newName => {
+    if (!newName || !newName.trim() || newName.trim() === currentName) return;
 
-  if (!newName || !newName.trim() || newName.trim() === currentName) return;
+    profiles[activeProfileId].name = newName.trim();
+    saveProfiles();
+    renderProfileSelect();
 
-  profiles[activeProfileId].name = newName.trim();
-  saveProfiles();
-  renderProfileSelect();
-
-  setStatus(`Profile renamed to: ${newName.trim()}`);
+    setStatus(`Profile renamed to: ${newName.trim()}`);
+  });
 }
 
 function deleteProfile() {
@@ -412,30 +1133,33 @@ function deleteProfile() {
 
   const profileCount = Object.keys(profiles).length;
   if (profileCount === 1) {
-    alert("Cannot delete the last profile. Create a new profile first.");
+    showAlert('Cannot Delete', 'Cannot delete the last profile. Create a new profile first.', 'warning');
     return;
   }
 
   const profileName = profiles[activeProfileId].name;
-  const confirm = window.confirm(`Are you sure you want to delete the profile "${profileName}"?\n\nThis will permanently delete all tracked mods, search results, and DMCA entries in this profile.`);
+  showConfirm('Delete Profile', `Are you sure you want to delete the profile "${profileName}"?\n\nThis will permanently delete all tracked mods, search results, and DMCA entries in this profile.`, {
+    confirmText: 'Delete',
+    danger: true
+  }).then(confirmed => {
+    if (!confirmed) return;
 
-  if (!confirm) return;
+    delete profiles[activeProfileId];
 
-  delete profiles[activeProfileId];
+    // Switch to first available profile
+    activeProfileId = Object.keys(profiles)[0];
+    loadActiveProfile();
+    saveProfiles();
 
-  // Switch to first available profile
-  activeProfileId = Object.keys(profiles)[0];
-  loadActiveProfile();
-  saveProfiles();
+    renderProfileSelect();
+    renderTrackedList();
+    renderSavedResults();
+    renderDmcaManager();
+    updateStats();
+    updateDmcaCounts();
 
-  renderProfileSelect();
-  renderTrackedList();
-  renderSavedResults();
-  renderDmcaManager();
-  updateStats();
-  updateDmcaCounts();
-
-  setStatus(`Deleted profile: ${profileName}`);
+    setStatus(`Deleted profile: ${profileName}`);
+  });
 }
 
 function toggleProfileDropdown() {
@@ -528,7 +1252,13 @@ function renderTrackedList() {
   document.querySelectorAll(".search-single-btn").forEach(btn => {
     btn.addEventListener("click", (e) => {
       const mod = trackedMods.find(m => m.id === e.target.dataset.id);
-      if (mod && mod.modId.trim()) searchSingleMod(mod);
+      if (mod && mod.modId.trim()) {
+        TaskQueue.add(
+          TaskQueue.TYPES.SEARCH_SINGLE,
+          { mod },
+          `Search: ${mod.modId}`
+        );
+      }
     });
   });
 
@@ -585,7 +1315,20 @@ function renderTrackedList() {
 }
 
 function setStatus(msg) {
-  statusEl.textContent = msg || "";
+  // Find or create the text span for status message
+  let textSpan = statusEl.querySelector('.status-text');
+  if (!textSpan) {
+    // Preserve existing queue tally container if present
+    const tallyContainer = statusEl.querySelector('#queueTallyContainer');
+    statusEl.innerHTML = '';
+    if (tallyContainer) {
+      statusEl.appendChild(tallyContainer);
+    }
+    textSpan = document.createElement('span');
+    textSpan.className = 'status-text';
+    statusEl.appendChild(textSpan);
+  }
+  textSpan.textContent = msg || "";
 }
 
 async function fetchAllForModId(modId, maxPages) {
@@ -605,8 +1348,9 @@ async function fetchAllForModId(modId, maxPages) {
 
 function getApprovedSet(mod) {
   const approved = new Set();
-  if (mod.approved && mod.approved.trim()) {
-    mod.approved.split(",").forEach(id => {
+  const approvedStr = typeof mod.approved === 'string' ? mod.approved : '';
+  if (approvedStr.trim()) {
+    approvedStr.split(",").forEach(id => {
       const clean = id.trim().replace(/[^\d]/g, "");
       if (clean) approved.add(clean);
     });
@@ -644,11 +1388,13 @@ async function checkDepotDownloaderConfig() {
 }
 
 async function promptDepotDownloaderPath() {
-  const path = prompt(
-    "DepotDownloader not configured!\n\n" +
-    "Please enter the path to DepotDownloader.exe:\n" +
-    "(Download from: https://github.com/SteamRE/DepotDownloader/releases)\n\n" +
-    "Example: C:\\DepotDownloader\\DepotDownloader.exe"
+  const path = await showPrompt(
+    'Configure DepotDownloader',
+    'DepotDownloader not configured!\n\nPlease enter the path to DepotDownloader.exe:\n(Download from: github.com/SteamRE/DepotDownloader/releases)',
+    {
+      placeholder: 'C:\\DepotDownloader\\DepotDownloader.exe',
+      submitText: 'Save Path'
+    }
   );
 
   if (!path || !path.trim()) {
@@ -665,14 +1411,14 @@ async function promptDepotDownloaderPath() {
     const data = await resp.json();
 
     if (resp.ok) {
-      alert(`✓ DepotDownloader configured successfully!\n\nPath: ${data.path}`);
+      await showAlert('Success', `DepotDownloader configured successfully!\n\nPath: ${data.path}`, 'success');
       return true;
     } else {
-      alert(`✗ Failed to configure DepotDownloader:\n\n${data.error}\n\nPath: ${path}`);
+      await showAlert('Configuration Failed', `Failed to configure DepotDownloader:\n\n${data.error}\n\nPath: ${path}`, 'error');
       return false;
     }
   } catch (err) {
-    alert(`✗ Error configuring DepotDownloader:\n\n${err.message}`);
+    await showAlert('Error', `Error configuring DepotDownloader:\n\n${err.message}`, 'error');
     return false;
   }
 }
@@ -770,7 +1516,9 @@ function importMods() {
 function clearResults() {
   resultsEl.innerHTML = '';
   searchResults = {};
+  manualMods = [];
   saveSearchResults();
+  saveManualMods();
   updateStats();
   setStatus('Results cleared');
 }
@@ -792,12 +1540,13 @@ function toggleApproval(modId, workshopId) {
   if (!mod) return;
   const approved = getApprovedSet(mod);
   const cleanId = workshopId.trim();
+  const approvedStr = typeof mod.approved === 'string' ? mod.approved : '';
 
   if (approved.has(cleanId)) {
-    const ids = mod.approved.split(",").map(id => id.trim().replace(/[^\d]/g, "")).filter(id => id && id !== cleanId);
+    const ids = approvedStr.split(",").map(id => id.trim().replace(/[^\d]/g, "")).filter(id => id && id !== cleanId);
     mod.approved = ids.join(", ");
   } else {
-    const current = mod.approved.trim();
+    const current = approvedStr.trim();
     mod.approved = current ? `${current}, ${cleanId}` : cleanId;
   }
 
@@ -878,19 +1627,32 @@ function renderModGroup(group, mod, data) {
     const isFiled = isDmcaFiled(wid);
     const isTakenDown = isDmcaTakenDown(wid);
     const inDmca = isInDmcaManager(wid);
+    const isManual = isManualMod(wid);
+    const manualData = getManualMod(wid);
 
     let cls = "resultItem", statusBadge = "", buttonHtml = "", displayStyle = "";
     if (filterUnapproved && (isOrig || isAppr)) displayStyle = ' style="display: none;"';
+    
+    if (isManual) cls += " manual-mod";
 
     if (isOrig) {
-      cls = "resultItem original";
+      cls = "resultItem original" + (isManual ? " manual-mod" : "");
       statusBadge = '<span class="badge status-badge" style="background: #daa520; color: #fff; border-color: #daa520;">ORIGINAL</span>';
     } else if (isAppr) {
-      cls = "resultItem approved";
+      cls = "resultItem approved" + (isManual ? " manual-mod" : "");
       statusBadge = '<span class="badge status-badge" style="background: var(--success); color: #fff; border-color: var(--success);">APPROVED</span>';
       buttonHtml = `<button class="approve-toggle-btn remove" data-modid="${escapeHtml(modId)}" data-workshopid="${escapeHtml(wid)}">Remove</button>`;
     } else {
       buttonHtml = `<button class="approve-toggle-btn add" data-modid="${escapeHtml(modId)}" data-workshopid="${escapeHtml(wid)}"${inDmca ? ' disabled title="Remove from DMCA list first"' : ''}>+ Approve</button>`;
+    }
+
+    // Add manual badge and remove button
+    if (isManual) {
+      statusBadge += '<span class="badge status-badge manual-badge" style="background: #ff6b35; color: #fff; margin-left: 4px; border-color: #ff6b35;">MANUAL</span>';
+      if (manualData && manualData.notes) {
+        statusBadge += `<span class="manual-notes" title="${escapeHtml(manualData.notes)}" style="margin-left: 4px; cursor: help;">📝</span>`;
+      }
+      buttonHtml += `<button class="manual-remove-btn" data-workshopid="${escapeHtml(wid)}" title="Remove this manually added item">×</button>`;
     }
 
     if (!isOrig) {
@@ -1270,6 +2032,7 @@ function renderDmcaManager() {
       actionsHtml = `
         <button class="dmca-copy-msg-btn" data-workshopid="${escapeHtml(entry.workshopId)}" title="Copy DMCA message to clipboard">Copy DMCA Message</button>
         <button class="dmca-remove-btn" data-workshopid="${escapeHtml(entry.workshopId)}" title="Remove from DMCA list">×</button>
+        <button class="dmca-verify-single-btn" data-workshopid="${escapeHtml(entry.workshopId)}" title="Verify this single entry">Verify</button>
       `;
     } else {
       actionsHtml = `
@@ -1277,6 +2040,7 @@ function renderDmcaManager() {
         <button class="dmca-file-btn" data-workshopid="${escapeHtml(entry.workshopId)}" title="Open Steam DMCA form">File</button>
         <button class="dmca-filed-btn${isFiled ? ' is-filed' : ''}" data-workshopid="${escapeHtml(entry.workshopId)}" title="${isFiled ? 'Click to unmark as filed' : 'Mark as filed'}">${isFiled ? '✓ Filed' : 'Mark Filed'}</button>
         <button class="dmca-remove-btn" data-workshopid="${escapeHtml(entry.workshopId)}" title="Remove from DMCA list">×</button>
+        <button class="dmca-verify-single-btn" data-workshopid="${escapeHtml(entry.workshopId)}" title="Verify this single entry">Verify</button>
       `;
     }
 
@@ -1581,7 +2345,14 @@ function buildVerificationExport() {
 }
 
 async function importFromProfile() {
-  const profileInput = prompt("Enter Steam profile URL or profile ID:\n\nExamples:\n- https://steamcommunity.com/id/Chuckleberry_Finn\n- https://steamcommunity.com/profiles/76561198012345678\n- Chuckleberry_Finn");
+  const profileInput = await showPrompt(
+    'Import from Steam Profile', 
+    'Enter Steam profile URL or profile ID:',
+    {
+      placeholder: 'https://steamcommunity.com/id/YourProfile or just YourProfile',
+      submitText: 'Fetch Mods'
+    }
+  );
 
   if (!profileInput || !profileInput.trim()) return;
 
@@ -1736,13 +2507,30 @@ function renderSavedResults() {
 
 // Event listeners
 addModBtn.addEventListener("click", addMod);
-runBtn.addEventListener("click", renderResults);
+runBtn.addEventListener("click", () => {
+  TaskQueue.add(
+    TaskQueue.TYPES.SEARCH_ALL,
+    {},
+    'Search All Mods'
+  );
+});
 exportBtn.addEventListener("click", exportMods);
 importBtn.addEventListener("click", importMods);
 importProfileBtn.addEventListener("click", importFromProfile);
 exportDmcaBtn.addEventListener("click", exportDmcaList);
 importDmcaBtn.addEventListener("click", importDmcaList);
-recheckFiledBtn.addEventListener("click", recheckFiledItems);
+recheckFiledBtn.addEventListener("click", () => {
+  const filedEntries = dmcaEntries.filter(e => e.filedDate && !e.takenDownDate);
+  if (filedEntries.length === 0) {
+    showAlert('No Filed Entries', 'There are no filed entries to re-check.', 'info');
+    return;
+  }
+  TaskQueue.add(
+    TaskQueue.TYPES.RECHECK_FILED,
+    {},
+    `Re-check ${filedEntries.length} filed items`
+  );
+});
 
 showPendingOnlyCheckbox.addEventListener("change", () => {
   showPendingOnly = showPendingOnlyCheckbox.checked;
@@ -1911,19 +2699,20 @@ async function pollVerifyStatus() {
 
         // Show summary
         const summary = status.results.summary || {};
-        alert(
-          `Verification complete!\n\n` +
+        showAlert(
+          'Verification Complete',
           `High Match (75%+): ${summary.high || 0}\n` +
           `Medium (50-74%): ${summary.medium || 0}\n` +
           `Low (25-49%): ${summary.low || 0}\n` +
           `No Match (<25%): ${summary.none || 0}\n` +
-          `Taken Down: ${summary.takenDown || 0}`
+          `Taken Down: ${summary.takenDown || 0}`,
+          'success'
         );
       } else if (status.error && status.error.message) {
-        alert("Verify error: " + status.error.message);
+        showAlert('Verification Error', status.error.message, 'error');
       } else {
         console.error("No results in status:", status);
-        alert("Verifier returned no results");
+        showAlert('Verification Error', 'Verifier returned no results', 'error');
       }
       return;
     }
@@ -1956,7 +2745,7 @@ if (verifyDmcaBtn) {
     const entries = loadDmcaEntriesForVerify();
 
     if (!entries.length) {
-      alert("No DMCA entries found.\n\nAdd some workshop items using \"+ DMCA\" first.");
+      showAlert('No Entries', 'No DMCA entries found.\n\nAdd some workshop items using "+ DMCA" first.', 'warning');
       return;
     }
 
@@ -1990,7 +2779,7 @@ if (verifyDmcaBtn) {
           verifyDmcaBtn.click();
         }
       } else {
-        alert("Verify failed: " + (e?.message || e));
+        showAlert('Verification Failed', e?.message || String(e), 'error');
       }
 
       setStatus("Verification failed");
@@ -2004,18 +2793,18 @@ if (configDepotBtn) {
   configDepotBtn.addEventListener("click", async () => {
     const config = await checkDepotDownloaderConfig();
 
-    let message = "DepotDownloader Configuration\n\n";
-
+    let message;
     if (config.configured) {
-      message += `Current path: ${config.path}\n\n`;
-      message += "Enter a new path to update, or click Cancel to keep current configuration.";
+      message = `Current path: ${config.path}\n\nEnter a new path to update, or click Cancel to keep current configuration.`;
     } else {
-      message += "DepotDownloader is not configured.\n\n";
-      message += "Enter the path to DepotDownloader.exe:\n";
-      message += "(Download from: https://github.com/SteamRE/DepotDownloader/releases)";
+      message = "DepotDownloader is not configured.\n\nEnter the path to DepotDownloader.exe:\n(Download from: github.com/SteamRE/DepotDownloader/releases)";
     }
 
-    const newPath = prompt(message, config.path || "");
+    const newPath = await showPrompt('DepotDownloader Configuration', message, {
+      defaultValue: config.path || '',
+      placeholder: 'C:\\DepotDownloader\\DepotDownloader.exe',
+      submitText: 'Save Path'
+    });
 
     if (newPath && newPath.trim() && newPath !== config.path) {
       try {
@@ -2029,14 +2818,14 @@ if (configDepotBtn) {
 
         if (resp.ok) {
           setStatus(`DepotDownloader configured: ${data.path}`);
-          alert(`✓ DepotDownloader configured successfully!\n\nPath: ${data.path}`);
+          showAlert('Success', `DepotDownloader configured successfully!\n\nPath: ${data.path}`, 'success');
         } else {
           setStatus(`Failed to configure DepotDownloader: ${data.error}`);
-          alert(`✗ ${data.error}`);
+          showAlert('Configuration Failed', data.error, 'error');
         }
       } catch (err) {
         setStatus(`Error: ${err.message}`);
-        alert(`✗ Error: ${err.message}`);
+        showAlert('Error', err.message, 'error');
       }
     }
   });
@@ -2054,6 +2843,403 @@ if (configDepotBtn) {
     console.log("DepotDownloader configured:", config.path);
   }
 })();
+
+
+// ============================================================================
+// MANUAL MOD MODAL & FUNCTIONS
+// ============================================================================
+
+function showManualModModal() {
+  let modal = document.getElementById('manualModModal');
+  if (!modal) {
+    modal = document.createElement('div');
+    modal.id = 'manualModModal';
+    modal.className = 'modal-overlay';
+    modal.innerHTML = `
+      <div class="modal-content" style="max-width: 500px;">
+        <div class="modal-header" style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; padding-bottom: 16px; border-bottom: 1px solid var(--border);">
+          <h3 style="margin: 0; color: var(--text-primary);">Add Workshop ID Manually</h3>
+          <button class="modal-close" onclick="closeManualModModal()" style="background: none; border: none; font-size: 28px; cursor: pointer; color: var(--text-muted); padding: 0; width: 32px; height: 32px; line-height: 1;">×</button>
+        </div>
+        <form id="manualModForm" onsubmit="handleManualModSubmit(event)">
+          <div class="form-group" style="margin-bottom: 16px;">
+            <label style="display: block; font-weight: 600; margin-bottom: 6px; color: var(--text-primary);">Workshop ID *</label>
+            <input type="text" id="manualWorkshopId" placeholder="e.g., 2464201 or full Steam URL" required style="width: 100%; padding: 10px; border: 1px solid var(--border); border-radius: 4px; background: var(--bg-secondary); color: var(--text-primary); font-family: 'Courier New', monospace;">
+            <small style="color: var(--text-muted); font-size: 12px; display: block; margin-top: 4px;">Steam Workshop ID or URL - title and mod IDs will be fetched automatically</small>
+          </div>
+          <div id="manualModPreview" style="display: none; margin-bottom: 16px; padding: 12px; background: var(--bg-primary); border: 1px solid var(--border); border-radius: 4px;">
+            <div style="font-size: 12px; color: var(--text-muted); margin-bottom: 4px;">Preview:</div>
+            <div id="manualModPreviewTitle" style="font-weight: 600; color: var(--text-primary);"></div>
+            <div id="manualModPreviewModIds" style="font-size: 12px; color: var(--text-secondary); margin-top: 4px;"></div>
+          </div>
+          <div id="manualModError" style="display: none; margin-bottom: 16px; padding: 10px; background: rgba(198, 40, 40, 0.15); border: 1px solid var(--danger); border-radius: 4px; color: var(--danger); font-size: 13px;"></div>
+          <div class="modal-actions" style="display: flex; gap: 10px; justify-content: flex-end;">
+            <button type="button" class="secondary-btn" onclick="closeManualModModal()">Cancel</button>
+            <button type="submit" id="manualModSubmitBtn" class="add-btn" style="background: #ff6b35; border-color: #ff6b35;">Add to Results</button>
+          </div>
+        </form>
+      </div>
+    `;
+    document.body.appendChild(modal);
+    
+    modal.addEventListener('click', (e) => {
+      if (e.target.id === 'manualModModal') closeManualModModal();
+    });
+  }
+  
+  // Reset state
+  document.getElementById('manualModPreview').style.display = 'none';
+  document.getElementById('manualModError').style.display = 'none';
+  document.getElementById('manualModSubmitBtn').disabled = false;
+  document.getElementById('manualModSubmitBtn').textContent = 'Add to Results';
+  
+  modal.classList.add('active');
+  setTimeout(() => document.getElementById('manualWorkshopId')?.focus(), 100);
+}
+
+function closeManualModModal() {
+  const modal = document.getElementById('manualModModal');
+  if (modal) {
+    modal.classList.remove('active');
+    document.getElementById('manualModForm')?.reset();
+  }
+}
+
+async function handleManualModSubmit(event) {
+  event.preventDefault();
+  
+  let workshopId = document.getElementById('manualWorkshopId').value.trim();
+  const submitBtn = document.getElementById('manualModSubmitBtn');
+  const errorDiv = document.getElementById('manualModError');
+  const previewDiv = document.getElementById('manualModPreview');
+  
+  // Extract workshop ID from URL if needed
+  const urlMatch = workshopId.match(/[?&]id=(\d+)/);
+  if (urlMatch) {
+    workshopId = urlMatch[1];
+  } else if (!/^\d+$/.test(workshopId)) {
+    // Try to extract just numbers if it looks like a partial URL
+    const numMatch = workshopId.match(/(\d{5,})/);
+    if (numMatch) {
+      workshopId = numMatch[1];
+    }
+  }
+  
+  if (!workshopId || !/^\d+$/.test(workshopId)) {
+    errorDiv.textContent = 'Please enter a valid Workshop ID (numbers only or a Steam Workshop URL)';
+    errorDiv.style.display = 'block';
+    return;
+  }
+  
+  try {
+    if (manualMods.some(m => m.workshopId === workshopId)) {
+      throw new Error('This workshop ID is already manually added');
+    }
+    
+    // Disable submit button and show loading state
+    submitBtn.disabled = true;
+    submitBtn.textContent = 'Fetching...';
+    errorDiv.style.display = 'none';
+    
+    setStatus(`Fetching workshop details for ${workshopId}...`);
+    
+    // Fetch workshop details including parsed mod IDs
+    let workshopData = null;
+    try {
+      const resp = await SteamRateLimiter.fetchWithRateLimit(`/api/workshop-full-details?workshopId=${workshopId}`);
+      workshopData = await resp.json();
+      
+      if (workshopData.error) {
+        throw new Error(workshopData.error);
+      }
+      
+      if (!workshopData.exists) {
+        throw new Error('Workshop item not found or has been removed');
+      }
+    } catch (e) {
+      // Fallback to basic check if full details endpoint fails
+      console.warn('Full details fetch failed, trying basic check:', e);
+      const resp = await SteamRateLimiter.fetchWithRateLimit(`/api/check-workshop-exists?workshopId=${workshopId}`);
+      workshopData = await resp.json();
+      
+      if (!workshopData.exists) {
+        throw new Error('Workshop item not found or has been removed');
+      }
+      
+      workshopData.modIds = [];
+    }
+    
+    const title = workshopData.title || `Workshop Item ${workshopId}`;
+    const parsedModIds = workshopData.modIds || [];
+    
+    // Find which tracked mods match the parsed mod IDs
+    const matchingTrackedMods = trackedMods.filter(tm => 
+      parsedModIds.some(pid => pid.toLowerCase() === tm.modId.toLowerCase())
+    );
+    
+    const manualMod = {
+      workshopId: workshopId,
+      title: title,
+      modIds: parsedModIds,
+      matchingTrackedModIds: matchingTrackedMods.map(m => m.modId),
+      addedDate: new Date().toISOString(),
+      manual: true
+    };
+    
+    manualMods.push(manualMod);
+    saveManualMods();
+    
+    // Add to search results for each matching tracked mod
+    if (matchingTrackedMods.length > 0) {
+      for (const trackedMod of matchingTrackedMods) {
+        if (!searchResults[trackedMod.id]) {
+          searchResults[trackedMod.id] = {
+            items: [],
+            count: 0,
+            mod: trackedMod,
+            searchDate: new Date().toISOString()
+          };
+        }
+        
+        if (!searchResults[trackedMod.id].items.some(i => i.workshopId === workshopId)) {
+          searchResults[trackedMod.id].items.unshift({
+            workshopId: workshopId,
+            title: title,
+            author: workshopData.author || 'Unknown',
+            manual: true
+          });
+          searchResults[trackedMod.id].count = searchResults[trackedMod.id].items.length;
+        }
+        
+        let group = document.querySelector(`.group[data-modid="${trackedMod.modId}"]`);
+        if (!group) {
+          group = document.createElement("div");
+          group.className = collapsedGroups.has(trackedMod.modId) ? "group collapsed" : "group";
+          group.dataset.modid = trackedMod.modId;
+          group.innerHTML = `<div class="group-header"><span class="collapse-icon">▼</span><h3></h3></div><div class="group-content"></div>`;
+          resultsEl.appendChild(group);
+          group.querySelector(".group-header").addEventListener("click", () => toggleCollapse(trackedMod.modId));
+        }
+        
+        renderModGroup(group, trackedMod, searchResults[trackedMod.id]);
+      }
+      saveSearchResults();
+      setStatus(`Added ${workshopId} to ${matchingTrackedMods.length} tracked mod group(s): ${matchingTrackedMods.map(m => m.modId).join(', ')}`);
+    } else {
+      // No matching tracked mods - create an "Unassociated" group or add to a default
+      setStatus(`Added ${workshopId} (no matching tracked mods found)`);
+      
+      // Still show in results under a special "Manual - Unassociated" group
+      const unassociatedKey = '_manual_unassociated_';
+      if (!searchResults[unassociatedKey]) {
+        searchResults[unassociatedKey] = {
+          items: [],
+          count: 0,
+          mod: { id: unassociatedKey, modId: 'Manual Additions (Unassociated)', workshopId: '', approved: '' },
+          searchDate: new Date().toISOString()
+        };
+      }
+      
+      if (!searchResults[unassociatedKey].items.some(i => i.workshopId === workshopId)) {
+        searchResults[unassociatedKey].items.unshift({
+          workshopId: workshopId,
+          title: title,
+          author: workshopData.author || 'Unknown',
+          manual: true,
+          parsedModIds: parsedModIds
+        });
+        searchResults[unassociatedKey].count = searchResults[unassociatedKey].items.length;
+        saveSearchResults();
+        
+        let group = document.querySelector(`.group[data-modid="Manual Additions (Unassociated)"]`);
+        if (!group) {
+          group = document.createElement("div");
+          group.className = collapsedGroups.has('Manual Additions (Unassociated)') ? "group collapsed" : "group";
+          group.dataset.modid = 'Manual Additions (Unassociated)';
+          group.innerHTML = `<div class="group-header"><span class="collapse-icon">▼</span><h3></h3></div><div class="group-content"></div>`;
+          resultsEl.appendChild(group);
+          group.querySelector(".group-header").addEventListener("click", () => toggleCollapse('Manual Additions (Unassociated)'));
+        }
+        
+        renderModGroup(group, searchResults[unassociatedKey].mod, searchResults[unassociatedKey]);
+      }
+    }
+    
+    closeManualModModal();
+    updateStats();
+    applyResultsFilters();
+    
+  } catch (error) {
+    errorDiv.textContent = error.message;
+    errorDiv.style.display = 'block';
+    submitBtn.disabled = false;
+    submitBtn.textContent = 'Add to Results';
+    setStatus(`Error: ${error.message}`);
+  }
+}
+
+function removeManualModFromResults(workshopId) {
+  showConfirm('Remove Manual Entry', 'Remove this manually added workshop ID?', {
+    confirmText: 'Remove',
+    danger: true
+  }).then(confirmed => {
+    if (!confirmed) return;
+    
+    manualMods = manualMods.filter(m => m.workshopId !== workshopId);
+    saveManualMods();
+    
+    Object.keys(searchResults).forEach(key => {
+      const result = searchResults[key];
+      if (result && result.items) {
+        result.items = result.items.filter(item => item.workshopId !== workshopId);
+        result.count = result.items.length;
+      }
+    });
+    saveSearchResults();
+    
+    Object.values(searchResults).forEach(result => {
+      if (result && result.mod) {
+        const group = document.querySelector(`.group[data-modid="${result.mod.modId}"]`);
+        if (group) renderModGroup(group, result.mod, result);
+      }
+    });
+    
+    updateStats();
+    setStatus(`Removed manual workshop ID ${workshopId}`);
+  });
+}
+
+// Verify single DMCA entry
+async function verifySingleDmcaEntry(workshopId) {
+  const entry = dmcaEntries.find(e => e.workshopId === workshopId);
+  if (!entry) {
+    setStatus('Entry not found');
+    return;
+  }
+  
+  const config = await checkDepotDownloaderConfig();
+  if (!config.configured) {
+    const userWantsConfig = await showConfirm(
+      'DepotDownloader Required',
+      'DepotDownloader is not configured.\n\nVerification requires DepotDownloader to compare file manifests.\n\nWould you like to configure it now?',
+      {
+        confirmText: 'Configure',
+        cancelText: 'Cancel'
+      }
+    );
+    
+    if (userWantsConfig) {
+      configDepotBtn.click();
+    }
+    return;
+  }
+  
+  setStatus(`Verifying ${entry.title}...`);
+  
+  // Filter out pseudo-mods like "Manual Additions (Unassociated)"
+  const realTrackedMods = trackedMods.filter(m => m.modId && !m.modId.startsWith('Manual Additions'));
+  
+  try {
+    const resp = await fetch('/api/verify-single', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ entry, trackedMods: realTrackedMods })
+    });
+    
+    const data = await resp.json();
+    
+    if (!resp.ok) {
+      throw new Error(data.error || 'Verification failed');
+    }
+    
+    entry.verification = data.verification;
+    saveDmcaEntries();
+    renderDmcaManager();
+    updateDmcaCounts();
+    
+    if (data.verification.verified) {
+      const pct = data.verification.matchPercentage || 0;
+      setStatus(`Verification complete: ${pct}% match for ${entry.title}`);
+    } else if (data.verification.takenDown) {
+      setStatus(`${entry.title} was taken down during verification`);
+    } else {
+      setStatus(`Verification complete for ${entry.title}`);
+    }
+    
+  } catch (err) {
+    setStatus(`Verification failed: ${err.message}`);
+    console.error('Verification error:', err);
+  }
+}
+
+// Initialize manual mods
+loadManualMods();
+
+// Add UI elements after page loads
+setTimeout(() => {
+  const resultsHeader = document.querySelector('#results').closest('.card').querySelector('.card-header .header-actions');
+  if (resultsHeader && !document.getElementById('addManualModBtn')) {
+    const btn = document.createElement('button');
+    btn.id = 'addManualModBtn';
+    btn.className = 'add-btn';
+    btn.style.cssText = 'background: #ff6b35; border-color: #ff6b35;';
+    btn.innerHTML = '+ Add Mod Manually';
+    btn.title = 'Add workshop ID manually to search results';
+    btn.onclick = showManualModModal;
+    
+    const sortLabel = resultsHeader.querySelector('label');
+    if (sortLabel) {
+      resultsHeader.insertBefore(btn, sortLabel);
+    } else {
+      resultsHeader.appendChild(btn);
+    }
+  }
+}, 100);
+
+// Event delegation for buttons
+document.addEventListener('click', (e) => {
+  if (e.target.classList.contains('manual-remove-btn')) {
+    const workshopId = e.target.dataset.workshopid;
+    if (workshopId) removeManualModFromResults(workshopId);
+  }
+  
+  if (e.target.classList.contains('dmca-verify-single-btn')) {
+    const workshopId = e.target.dataset.workshopid;
+    if (workshopId) {
+      const entry = dmcaEntries.find(en => en.workshopId === workshopId);
+      if (entry) {
+        // Check depot config before queuing
+        checkDepotDownloaderConfig().then(config => {
+          if (!config.configured) {
+            showConfirm(
+              'DepotDownloader Required',
+              'DepotDownloader is not configured.\n\nVerification requires DepotDownloader to compare file manifests.\n\nWould you like to configure it now?',
+              { confirmText: 'Configure', cancelText: 'Cancel' }
+            ).then(userWantsConfig => {
+              if (userWantsConfig) configDepotBtn.click();
+            });
+          } else {
+            TaskQueue.add(
+              TaskQueue.TYPES.VERIFY_SINGLE,
+              { workshopId },
+              `Verify: ${entry.title}`
+            );
+          }
+        });
+      }
+    }
+  }
+});
+
+// Close modal on Escape key
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape') {
+    const modal = document.getElementById('manualModModal');
+    if (modal && modal.classList.contains('active')) {
+      closeManualModModal();
+    }
+  }
+});
 
 // Legal Notice collapse functionality
 (function initLegalNotice() {

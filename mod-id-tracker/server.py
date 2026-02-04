@@ -337,6 +337,97 @@ def extract_mod_id(workshop_id: str):
     except Exception as e:
         return None, str(e)
 
+def get_workshop_full_details(workshop_id: str):
+    """Fetch full workshop item details including title and all mod IDs from description"""
+    url = f"https://steamcommunity.com/sharedfiles/filedetails/?id={workshop_id}"
+    try:
+        req = urllib.request.Request(url, headers={
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+        })
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            html = resp.read().decode("utf-8", errors="ignore")
+            
+            # Check if item exists
+            if 'class="error_ctn"' in html:
+                if "There was a problem accessing the item" in html or "This item has been removed" in html:
+                    return {
+                        "exists": False,
+                        "workshopId": workshop_id,
+                        "error": "Workshop item not found or removed"
+                    }
+            
+            # Extract title
+            title = None
+            title_match = re.search(r'<div class="workshopItemTitle">([^<]+)</div>', html)
+            if title_match:
+                title = title_match.group(1).strip()
+            
+            # Extract author
+            author = None
+            author_match = re.search(r'<div class="friendBlockContent">\s*([^<]+)\s*<br', html)
+            if author_match:
+                author = author_match.group(1).strip()
+            
+            # Extract all Mod IDs from the description
+            # Look for "Mod ID: xxxxx" patterns - there may be multiple
+            mod_ids = []
+            
+            # Pattern to find all Mod ID occurrences
+            mod_id_patterns = [
+                r'Mod\s*ID:\s*([A-Za-z0-9_\-]+)',
+                r'ModID:\s*([A-Za-z0-9_\-]+)',
+                r'mod\s*id:\s*([A-Za-z0-9_\-]+)',
+                # Also look for mod IDs in format "Mod ID(s): xxx, yyy"
+                r'Mod\s*IDs?:\s*([A-Za-z0-9_\-,\s]+?)(?:\s*(?:<br|<\/|[\r\n]|$))',
+            ]
+            
+            seen_mod_ids = set()
+            for pattern in mod_id_patterns:
+                matches = re.findall(pattern, html, re.IGNORECASE)
+                for match in matches:
+                    # Handle comma-separated mod IDs
+                    for mod_id in match.split(','):
+                        mod_id = mod_id.strip()
+                        # Validate it looks like a mod ID (not too long, no HTML)
+                        if mod_id and len(mod_id) <= 100 and '<' not in mod_id and mod_id.lower() not in seen_mod_ids:
+                            seen_mod_ids.add(mod_id.lower())
+                            mod_ids.append(mod_id)
+            
+            has_content = ("workshopItemTitle" in html) or ("workshopItemDescription" in html)
+            
+            return {
+                "exists": has_content,
+                "workshopId": workshop_id,
+                "title": title,
+                "author": author,
+                "modIds": mod_ids
+            }
+            
+    except urllib.error.HTTPError as e:
+        if e.code == 404:
+            return {
+                "exists": False,
+                "workshopId": workshop_id,
+                "error": "Workshop item not found (404)"
+            }
+        return {
+            "exists": True,  # Assume exists if we get other HTTP errors
+            "workshopId": workshop_id,
+            "title": None,
+            "author": None,
+            "modIds": [],
+            "error": f"HTTP error: {e.code}"
+        }
+    except Exception as e:
+        return {
+            "exists": True,  # Assume exists on other errors
+            "workshopId": workshop_id,
+            "title": None,
+            "author": None,
+            "modIds": [],
+            "error": str(e)
+        }
+
 def search_profile_workshop(profile_input: str, max_pages: int = 10):
     """Search for workshop items from a Steam profile"""
     # Parse profile input to get profile ID
@@ -732,6 +823,118 @@ class RequestHandler(BaseHTTPRequestHandler):
             self.send_json({"ok": True, "path": depot_path_str, "message": "DepotDownloader path saved"})
             return
 
+        if path == "/api/verify-single":
+            entry = payload.get("entry")
+            tracked_mods = payload.get("trackedMods", [])
+            
+            if not entry:
+                self.send_json({"error": "No entry provided"}, 400)
+                return
+            
+            workshop_id = entry.get("workshopId")
+            if not workshop_id:
+                self.send_json({"error": "No workshop ID provided"}, 400)
+                return
+            
+            # Check if DepotDownloader is configured
+            depot_path = find_depotdownloader()
+            if not depot_path:
+                self.send_json({
+                    "error": "DepotDownloader not configured",
+                    "configured": False
+                }, 400)
+                return
+            
+            # Filter out pseudo-mods like "Manual Additions (Unassociated)"
+            real_tracked_mods = [m for m in tracked_mods if m.get("modId") and not m.get("modId", "").startswith("Manual Additions")]
+            
+            # Build single entry list for verification
+            entries_to_verify = [{
+                "workshopId": workshop_id,
+                "title": entry.get("title", f"Workshop {workshop_id}"),
+                "containsModIds": entry.get("containsModIds", []),
+                "originalMods": []
+            }]
+            
+            # Add original workshop IDs for tracked mods
+            for mod_id in entry.get("containsModIds", []):
+                for tracked_mod in real_tracked_mods:
+                    if tracked_mod.get("modId") == mod_id:
+                        original_workshop_id = tracked_mod.get("workshopId")
+                        if original_workshop_id:
+                            entries_to_verify[0]["originalMods"].append({
+                                "modId": mod_id,
+                                "workshopId": original_workshop_id,
+                                "url": f"https://steamcommunity.com/sharedfiles/filedetails/?id={original_workshop_id}"
+                            })
+            
+            # Create temporary verification data
+            verify_data = {
+                "version": 2,
+                "exportDate": datetime.now().isoformat(),
+                "entries": entries_to_verify,
+                "trackedMods": [
+                    {
+                        "modId": m.get("modId"),
+                        "workshopId": m.get("workshopId", "")
+                    } for m in real_tracked_mods
+                ]
+            }
+            
+            # Save to temporary file
+            import tempfile
+            temp_file = os.path.join(tempfile.gettempdir(), f"verify_single_{workshop_id}.json")
+            with open(temp_file, "w", encoding="utf-8") as f:
+                json.dump(verify_data, f, indent=2)
+            
+            try:
+                # Run verification using verify_dmca.py
+                verify_script = os.path.join(os.path.dirname(__file__), "verify_dmca.py")
+                
+                if not os.path.exists(verify_script):
+                    self.send_json({"error": "Verification script not found"}, 500)
+                    return
+                
+                # Run verification
+                result = subprocess.run(
+                    [sys.executable, verify_script, temp_file],
+                    capture_output=True,
+                    text=True,
+                    timeout=300  # 5 minute timeout
+                )
+                
+                # Read results
+                with open(temp_file, "r", encoding="utf-8") as f:
+                    verified_data = json.load(f)
+                
+                # Extract verification results for this entry
+                if verified_data.get("entries") and len(verified_data["entries"]) > 0:
+                    verified_entry = verified_data["entries"][0]
+                    verification = verified_entry.get("verification", {})
+                    
+                    self.send_json({
+                        "success": True,
+                        "verification": verification,
+                        "entry": verified_entry
+                    })
+                else:
+                    self.send_json({"error": "No verification results returned"}, 500)
+                    
+            except subprocess.TimeoutExpired:
+                self.send_json({"error": "Verification timeout - process took too long"}, 408)
+            except Exception as e:
+                print(f"Verification error: {e}")
+                import traceback
+                traceback.print_exc()
+                self.send_json({"error": str(e)}, 500)
+            finally:
+                # Clean up temp file
+                try:
+                    os.remove(temp_file)
+                except:
+                    pass
+            return
+
         self.send_json({"error": "Unknown POST route"}, 404)
 
     def do_GET(self):
@@ -813,6 +1016,16 @@ class RequestHandler(BaseHTTPRequestHandler):
             })
             return
 
+        if path == "/api/workshop-full-details":
+            workshop_id = query.get("workshopId", [""])[0]
+            if not workshop_id:
+                self.send_json({"error": "Missing workshopId parameter"}, 400)
+                return
+
+            details = get_workshop_full_details(workshop_id)
+            self.send_json(details)
+            return
+
         if path == "/" or path == "":
             return self.send_file(PUBLIC_DIR / "index.html")
 
@@ -851,3 +1064,122 @@ if __name__ == "__main__":
         browser_thread.start()
 
     run_server(host, port)
+
+@app.route('/api/verify-single', methods=['POST'])
+def verify_single_entry():
+    """
+    Verify a single DMCA entry using DepotDownloader
+    """
+    try:
+        data = request.json
+        entry = data.get('entry')
+        tracked_mods = data.get('trackedMods', [])
+        
+        if not entry:
+            return jsonify({'error': 'No entry provided'}), 400
+        
+        workshop_id = entry.get('workshopId')
+        if not workshop_id:
+            return jsonify({'error': 'No workshop ID provided'}), 400
+        
+        # Check if DepotDownloader is configured
+        config_file = os.path.join(os.path.dirname(__file__), 'config.json')
+        depot_path = None
+        try:
+            if os.path.exists(config_file):
+                with open(config_file, 'r') as f:
+                    config = json.load(f)
+                    depot_path = config.get('depotDownloaderPath')
+        except Exception as e:
+            print(f"Error reading config: {e}")
+        
+        if not depot_path:
+            return jsonify({
+                'error': 'DepotDownloader not configured',
+                'configured': False
+            }), 400
+        
+        # Build single entry list for verification
+        entries_to_verify = [{
+            'workshopId': workshop_id,
+            'title': entry.get('title', f'Workshop {workshop_id}'),
+            'containsModIds': entry.get('containsModIds', []),
+            'originalMods': []
+        }]
+        
+        # Add original workshop IDs for tracked mods
+        for mod_id in entry.get('containsModIds', []):
+            for tracked_mod in tracked_mods:
+                if tracked_mod.get('modId') == mod_id:
+                    original_workshop_id = tracked_mod.get('workshopId')
+                    if original_workshop_id:
+                        entries_to_verify[0]['originalMods'].append({
+                            'modId': mod_id,
+                            'workshopId': original_workshop_id,
+                            'url': f'https://steamcommunity.com/sharedfiles/filedetails/?id={original_workshop_id}'
+                        })
+        
+        # Create temporary verification data
+        verify_data = {
+            'version': 2,
+            'exportDate': datetime.now().isoformat(),
+            'entries': entries_to_verify,
+            'trackedMods': [
+                {
+                    'modId': m.get('modId'),
+                    'workshopId': m.get('workshopId', '')
+                } for m in tracked_mods
+            ]
+        }
+        
+        # Save to temporary file
+        temp_file = os.path.join(tempfile.gettempdir(), f'verify_single_{workshop_id}.json')
+        with open(temp_file, 'w', encoding='utf-8') as f:
+            json.dump(verify_data, f, indent=2)
+        
+        try:
+            # Run verification using verify_dmca.py
+            verify_script = os.path.join(os.path.dirname(__file__), 'verify_dmca.py')
+            
+            if not os.path.exists(verify_script):
+                return jsonify({'error': 'Verification script not found'}), 500
+            
+            # Run verification
+            result = subprocess.run(
+                [sys.executable, verify_script, temp_file],
+                capture_output=True,
+                text=True,
+                timeout=300  # 5 minute timeout
+            )
+            
+            # Read results
+            with open(temp_file, 'r', encoding='utf-8') as f:
+                verified_data = json.load(f)
+            
+            # Extract verification results for this entry
+            if verified_data.get('entries') and len(verified_data['entries']) > 0:
+                verified_entry = verified_data['entries'][0]
+                verification = verified_entry.get('verification', {})
+                
+                return jsonify({
+                    'success': True,
+                    'verification': verification,
+                    'entry': verified_entry
+                })
+            else:
+                return jsonify({'error': 'No verification results returned'}), 500
+                
+        finally:
+            # Clean up temp file
+            try:
+                os.remove(temp_file)
+            except:
+                pass
+                
+    except subprocess.TimeoutExpired:
+        return jsonify({'error': 'Verification timeout - process took too long'}), 408
+    except Exception as e:
+        print(f"Verification error: {e}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({'error': str(e)}), 500
