@@ -279,7 +279,7 @@ const TaskQueue = {
     }
   },
   
-  // Verify single DMCA entry
+  // Verify single DMCA entry - uses same endpoint as verify all
   async executeVerifySingle(params) {
     const { workshopId } = params;
     const entry = dmcaEntries.find(e => e.workshopId === workshopId);
@@ -295,38 +295,34 @@ const TaskQueue = {
       return;
     }
     
+    // loadTrackedModsForVerify already filters out pseudo-mods
+    const realTrackedMods = loadTrackedModsForVerify();
+    
+    // Clean entry: filter out pseudo-mods from containsModIds
+    // For manual mods, use ALL tracked mods for comparison
+    const cleanedEntry = {
+      ...entry,
+      containsModIds: entry.manual 
+        ? realTrackedMods.map(m => m.modId) 
+        : (entry.containsModIds || []).filter(id => !id.startsWith('Manual Additions'))
+    };
+    
     setStatus(`[Queue] Verifying ${entry.title}...`);
     
-    // Filter out pseudo-mods like "Manual Additions (Unassociated)"
-    const realTrackedMods = trackedMods.filter(m => m.modId && !m.modId.startsWith('Manual Additions'));
-    
     try {
-      const resp = await fetch('/api/verify-single', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ entry, trackedMods: realTrackedMods })
+      setVerifyBtnRunning(true);
+      
+      // Use the same verify/start endpoint but with just this one entry
+      await apiPost("/api/verify/start", {
+        trackedMods: realTrackedMods,
+        entries: [cleanedEntry],
       });
       
-      const data = await resp.json();
+      // Poll for completion
+      await pollVerifyStatus();
       
-      if (!resp.ok) {
-        throw new Error(data.error || 'Verification failed');
-      }
-      
-      entry.verification = data.verification;
-      saveDmcaEntries();
-      renderDmcaManager();
-      updateDmcaCounts();
-      
-      if (data.verification.verified) {
-        const pct = data.verification.matchPercentage || 0;
-        setStatus(`[Queue] Verification complete: ${pct}% match for ${entry.title}`);
-      } else if (data.verification.takenDown) {
-        setStatus(`[Queue] ${entry.title} was taken down during verification`);
-      } else {
-        setStatus(`[Queue] Verification complete for ${entry.title}`);
-      }
     } catch (err) {
+      setVerifyBtnRunning(false);
       setStatus(`[Queue] Verification failed: ${err.message}`);
       throw err;
     }
@@ -852,11 +848,14 @@ async function showPrompt(title, message, options = {}) {
 
 function generateDmcaMessage(entry, trackedMods) {
   const originalModUrls = [];
+  // Filter out pseudo-mods
+  const realTrackedMods = trackedMods.filter(m => m.modId && !m.modId.startsWith('Manual Additions'));
+  const realModIds = (entry.containsModIds || []).filter(id => !id.startsWith('Manual Additions'));
 
   // Build list of original mod URLs from containsModIds
-  if (entry.containsModIds && entry.containsModIds.length > 0) {
-    entry.containsModIds.forEach(modId => {
-      const trackedMod = trackedMods.find(m => m.modId === modId);
+  if (realModIds.length > 0) {
+    realModIds.forEach(modId => {
+      const trackedMod = realTrackedMods.find(m => m.modId === modId);
       if (trackedMod && trackedMod.workshopId) {
         originalModUrls.push(`https://steamcommunity.com/sharedfiles/filedetails/?id=${trackedMod.workshopId}`);
       }
@@ -907,6 +906,7 @@ function loadData() {
         mods: [],
         dmca: [],
         searchResults: {},
+        manualMods: [],
         collapsed: []
       };
     }
@@ -918,6 +918,7 @@ function loadData() {
       mods: [],
       dmca: [],
       searchResults: {},
+      manualMods: [],
       collapsed: []
     };
   }
@@ -947,6 +948,7 @@ function loadActiveProfile() {
   const profile = profiles[activeProfileId];
   trackedMods = profile.mods || [];
   dmcaEntries = profile.dmca || [];
+  manualMods = profile.manualMods || [];
 
   // Deduplicate DMCA entries by workshop ID (keep the most recent/complete one)
   const uniqueEntries = new Map();
@@ -966,6 +968,24 @@ function loadActiveProfile() {
     if (entry.takenDownDate === undefined) {
       entry.takenDownDate = null;
     }
+    
+    // Clean up: Remove "Manual Additions (Unassociated)" from containsModIds
+    entry.containsModIds = entry.containsModIds.filter(id => !id.startsWith('Manual Additions'));
+    
+    // Clean up: If modId is "Manual Additions (Unassociated)", clear it
+    if (entry.modId && entry.modId.startsWith('Manual Additions')) {
+      entry.modId = entry.containsModIds[0] || '';
+    }
+    
+    // For manual entries with no/empty containsModIds, add ALL tracked mods
+    if (entry.manual && entry.containsModIds.length === 0) {
+      trackedMods.forEach(tm => {
+        if (tm.modId && tm.modId.trim() && !tm.modId.startsWith('Manual Additions')) {
+          entry.containsModIds.push(tm.modId.trim());
+        }
+      });
+    }
+    
     return entry;
   });
 
@@ -1002,6 +1022,7 @@ function saveActiveProfile() {
   profiles[activeProfileId].mods = trackedMods;
   profiles[activeProfileId].dmca = dmcaEntries;
   profiles[activeProfileId].searchResults = searchResults;
+  profiles[activeProfileId].manualMods = manualMods;
   profiles[activeProfileId].collapsed = [...collapsedGroups];
   profiles[activeProfileId].filterUnapproved = filterUnapproved;
   profiles[activeProfileId].sortOrder = sortOrder;
@@ -1022,21 +1043,27 @@ function saveData() {
 // ============================================================================
 
 function loadManualMods() {
-  try {
-    const stored = localStorage.getItem(LS_MANUAL_MODS);
-    if (stored) manualMods = JSON.parse(stored);
-  } catch (e) {
-    console.error('Failed to load manual mods:', e);
-    manualMods = [];
+  // Manual mods are now loaded as part of loadActiveProfile()
+  // This function exists for backwards compatibility
+  // Try to migrate from old localStorage if profile doesn't have manual mods
+  if (manualMods.length === 0) {
+    try {
+      const stored = localStorage.getItem(LS_MANUAL_MODS);
+      if (stored) {
+        manualMods = JSON.parse(stored);
+        // Save to profile and clear old storage
+        saveActiveProfile();
+        localStorage.removeItem(LS_MANUAL_MODS);
+      }
+    } catch (e) {
+      console.error('Failed to migrate manual mods:', e);
+    }
   }
 }
 
 function saveManualMods() {
-  try {
-    localStorage.setItem(LS_MANUAL_MODS, JSON.stringify(manualMods));
-  } catch (e) {
-    console.error('Failed to save manual mods:', e);
-  }
+  // Manual mods are now saved as part of the profile
+  saveActiveProfile();
 }
 
 function isManualMod(workshopId) {
@@ -1101,6 +1128,7 @@ function createNewProfile() {
       mods: [],
       dmca: [],
       searchResults: {},
+      manualMods: [],
       collapsed: []
     };
 
@@ -1836,26 +1864,39 @@ function toggleDmcaEntry(workshopId, title, modId) {
         const found = result.items.find(item => String(item.workshopId || "").trim() === workshopId);
         if (found) {
           const trackedModId = result.mod.modId.trim();
-          if (!containsModIds.includes(trackedModId)) {
+          // Skip pseudo-mods like "Manual Additions (Unassociated)"
+          if (trackedModId && !trackedModId.startsWith('Manual Additions') && !containsModIds.includes(trackedModId)) {
             containsModIds.push(trackedModId);
           }
         }
       }
     });
 
-    // Fallback to the triggering mod ID if none found
-    if (containsModIds.length === 0) {
+    // Check if this is a manual mod - if so, compare against ALL tracked mods
+    const manualMod = manualMods.find(m => m.workshopId === workshopId);
+    if (manualMod) {
+      // For manual mods, include ALL tracked mod IDs for verification comparison
+      trackedMods.forEach(tm => {
+        if (tm.modId && tm.modId.trim() && !tm.modId.startsWith('Manual Additions') && !containsModIds.includes(tm.modId.trim())) {
+          containsModIds.push(tm.modId.trim());
+        }
+      });
+    }
+
+    // Fallback to the triggering mod ID if none found (but not if it's a pseudo-mod)
+    if (containsModIds.length === 0 && modId && !modId.startsWith('Manual Additions')) {
       containsModIds.push(modId);
     }
 
     dmcaEntries.push({
       workshopId,
       title,
-      modId,
+      modId: modId && !modId.startsWith('Manual Additions') ? modId : (containsModIds[0] || ''),
       containsModIds, // Array of tracked mod IDs found in this workshop item
       addedDate: new Date().toISOString(),
       filedDate: null,
-      takenDownDate: null
+      takenDownDate: null,
+      manual: !!manualMod
     });
   }
 
@@ -1976,8 +2017,10 @@ function renderDmcaManager() {
 
     // Build tracked mod IDs section with per-mod stats
     let trackedModsHtml = '';
-    if (entry.containsModIds && entry.containsModIds.length > 0) {
-      const modIdsList = entry.containsModIds.map(id => {
+    // Filter out pseudo-mods from display
+    const displayModIds = (entry.containsModIds || []).filter(id => !id.startsWith('Manual Additions'));
+    if (displayModIds.length > 0) {
+      const modIdsList = displayModIds.map(id => {
         const v = entry.verification;
         const r = v && v.modResults ? v.modResults[id] : null;
 
@@ -2018,7 +2061,7 @@ function renderDmcaManager() {
         <div class="dmca-tracked-mods collapsed" data-workshopid="${escapeHtml(entry.workshopId)}">
           <div class="tracked-mods-toggle">
             <span class="toggle-icon">▶</span>
-            <span class="toggle-label">Contains ${entry.containsModIds.length} tracked mod${entry.containsModIds.length > 1 ? 's' : ''}</span>
+            <span class="toggle-label">Contains ${displayModIds.length} tracked mod${displayModIds.length > 1 ? 's' : ''}</span>
           </div>
           <div class="tracked-mods-list">
             ${modIdsList}
@@ -2132,9 +2175,11 @@ function exportDmcaList() {
   // Enhance entries with original workshop IDs
   const enhancedEntries = dmcaEntries.map(entry => {
     const originalWorkshopIds = [];
+    // Filter out pseudo-mods
+    const realModIds = (entry.containsModIds || []).filter(id => !id.startsWith('Manual Additions'));
 
-    if (entry.containsModIds && entry.containsModIds.length > 0) {
-      entry.containsModIds.forEach(modId => {
+    if (realModIds.length > 0) {
+      realModIds.forEach(modId => {
         const trackedMod = trackedMods.find(m => m.modId === modId);
         if (trackedMod && trackedMod.workshopId) {
           originalWorkshopIds.push({
@@ -2148,6 +2193,7 @@ function exportDmcaList() {
 
     return {
       ...entry,
+      containsModIds: realModIds,
       originalMods: originalWorkshopIds
     };
   });
@@ -2313,11 +2359,17 @@ async function recheckFiledItems() {
 
 function buildVerificationExport() {
   // Build the export data needed for verification
+  // Filter out pseudo-mods from tracked mods
+  const realTrackedMods = trackedMods.filter(m => m.modId && !m.modId.startsWith('Manual Additions'));
+  
   const enhancedEntries = dmcaEntries.map(entry => {
     const originalWorkshopIds = [];
-    if (entry.containsModIds && entry.containsModIds.length > 0) {
-      entry.containsModIds.forEach(modId => {
-        const trackedMod = trackedMods.find(m => m.modId === modId);
+    // Filter out pseudo-mods from containsModIds
+    const realModIds = (entry.containsModIds || []).filter(id => !id.startsWith('Manual Additions'));
+    
+    if (realModIds.length > 0) {
+      realModIds.forEach(modId => {
+        const trackedMod = realTrackedMods.find(m => m.modId === modId);
         if (trackedMod && trackedMod.workshopId) {
           originalWorkshopIds.push({
             modId: trackedMod.modId,
@@ -2329,6 +2381,7 @@ function buildVerificationExport() {
     }
     return {
       ...entry,
+      containsModIds: realModIds,
       originalMods: originalWorkshopIds
     };
   });
@@ -2337,7 +2390,7 @@ function buildVerificationExport() {
     version: 2,
     exportDate: new Date().toISOString(),
     entries: enhancedEntries,
-    trackedMods: trackedMods.map(m => ({
+    trackedMods: realTrackedMods.map(m => ({
       modId: m.modId,
       workshopId: m.workshopId || ''
     }))
@@ -2626,10 +2679,13 @@ function loadTrackedModsForVerify() {
     return [];
   }
   const profile = profiles[activeProfileId];
-  return (profile.mods || []).map(m => ({
-    modId: m.modId,
-    workshopId: m.workshopId || ''
-  }));
+  // Filter out pseudo-mods like "Manual Additions (Unassociated)"
+  return (profile.mods || [])
+    .filter(m => m.modId && !m.modId.startsWith('Manual Additions'))
+    .map(m => ({
+      modId: m.modId,
+      workshopId: m.workshopId || ''
+    }));
 }
 
 function loadDmcaEntriesForVerify() {
@@ -2637,7 +2693,17 @@ function loadDmcaEntriesForVerify() {
     return [];
   }
   const profile = profiles[activeProfileId];
-  return profile.dmca || [];
+  const entries = profile.dmca || [];
+  const realTrackedMods = loadTrackedModsForVerify();
+  
+  // Clean entries: filter out pseudo-mods from containsModIds
+  // For manual entries, use ALL tracked mods for comparison
+  return entries.map(entry => ({
+    ...entry,
+    containsModIds: entry.manual 
+      ? realTrackedMods.map(m => m.modId) 
+      : (entry.containsModIds || []).filter(id => !id.startsWith('Manual Additions'))
+  }));
 }
 
 function setVerifyBtnRunning(running) {
@@ -3027,7 +3093,7 @@ async function handleManualModSubmit(event) {
       setStatus(`Added ${workshopId} to ${matchingTrackedMods.length} tracked mod group(s): ${matchingTrackedMods.map(m => m.modId).join(', ')}`);
     } else {
       // No matching tracked mods - create an "Unassociated" group or add to a default
-      setStatus(`Added ${workshopId} (no matching tracked mods found)`);
+      setStatus(`Added ${workshopId} (no matching tracked mods found - parsed mod IDs: ${parsedModIds.length > 0 ? parsedModIds.join(', ') : 'none'})`);
       
       // Still show in results under a special "Manual - Unassociated" group
       const unassociatedKey = '_manual_unassociated_';
@@ -3109,7 +3175,7 @@ function removeManualModFromResults(workshopId) {
   });
 }
 
-// Verify single DMCA entry
+// Verify single DMCA entry - uses same endpoint as verify all
 async function verifySingleDmcaEntry(workshopId) {
   const entry = dmcaEntries.find(e => e.workshopId === workshopId);
   if (!entry) {
@@ -3134,39 +3200,34 @@ async function verifySingleDmcaEntry(workshopId) {
     return;
   }
   
+  // loadTrackedModsForVerify already filters out pseudo-mods
+  const realTrackedMods = loadTrackedModsForVerify();
+  
+  // Clean entry: filter out pseudo-mods from containsModIds
+  // For manual mods, use ALL tracked mods for comparison
+  const cleanedEntry = {
+    ...entry,
+    containsModIds: entry.manual 
+      ? realTrackedMods.map(m => m.modId) 
+      : (entry.containsModIds || []).filter(id => !id.startsWith('Manual Additions'))
+  };
+  
   setStatus(`Verifying ${entry.title}...`);
   
-  // Filter out pseudo-mods like "Manual Additions (Unassociated)"
-  const realTrackedMods = trackedMods.filter(m => m.modId && !m.modId.startsWith('Manual Additions'));
-  
   try {
-    const resp = await fetch('/api/verify-single', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ entry, trackedMods: realTrackedMods })
+    setVerifyBtnRunning(true);
+    
+    // Use the same verify/start endpoint but with just this one entry
+    await apiPost("/api/verify/start", {
+      trackedMods: realTrackedMods,
+      entries: [cleanedEntry],
     });
     
-    const data = await resp.json();
-    
-    if (!resp.ok) {
-      throw new Error(data.error || 'Verification failed');
-    }
-    
-    entry.verification = data.verification;
-    saveDmcaEntries();
-    renderDmcaManager();
-    updateDmcaCounts();
-    
-    if (data.verification.verified) {
-      const pct = data.verification.matchPercentage || 0;
-      setStatus(`Verification complete: ${pct}% match for ${entry.title}`);
-    } else if (data.verification.takenDown) {
-      setStatus(`${entry.title} was taken down during verification`);
-    } else {
-      setStatus(`Verification complete for ${entry.title}`);
-    }
+    // Poll for completion
+    await pollVerifyStatus();
     
   } catch (err) {
+    setVerifyBtnRunning(false);
     setStatus(`Verification failed: ${err.message}`);
     console.error('Verification error:', err);
   }

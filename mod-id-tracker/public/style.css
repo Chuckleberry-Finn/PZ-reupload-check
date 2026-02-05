@@ -1821,83 +1821,38 @@ button:active {
    ============================================================================ */
 
 .resultItem.manual-mod {
-  border-left: 4px solid #ff6b35;
-  background: linear-gradient(90deg, rgba(255, 107, 53, 0.08) 0%, transparent 10%);
-  position: relative;
-}
-
-.resultItem.manual-mod::before {
-  content: '';
-  position: absolute;
-  top: 0;
-  right: 0;
-  width: 0;
-  height: 0;
-  border-style: solid;
-  border-width: 0 40px 40px 0;
-  border-color: transparent #ff6b35 transparent transparent;
-  opacity: 0.15;
+  border-left: 3px solid #ff6b35;
 }
 
 .resultItem.manual-mod.approved {
   border-left-color: var(--success);
-  background: linear-gradient(90deg, rgba(76, 175, 80, 0.08) 0%, transparent 10%);
-}
-
-.resultItem.manual-mod.approved::before {
-  border-color: transparent var(--success) transparent transparent;
 }
 
 .resultItem.manual-mod.original {
   border-left-color: #daa520;
-  background: linear-gradient(90deg, rgba(218, 165, 32, 0.08) 0%, transparent 10%);
-}
-
-.resultItem.manual-mod.original::before {
-  border-color: transparent #daa520 transparent transparent;
 }
 
 .resultItem.manual-mod.filed {
   border-left-color: #2196f3;
-  background: linear-gradient(90deg, rgba(33, 150, 243, 0.08) 0%, transparent 10%);
-}
-
-.resultItem.manual-mod.filed::before {
-  border-color: transparent #2196f3 transparent transparent;
 }
 
 .resultItem.manual-mod.taken-down {
   border-left-color: #6a5fa8;
-  background: linear-gradient(90deg, rgba(106, 95, 168, 0.08) 0%, transparent 10%);
-}
-
-.resultItem.manual-mod.taken-down::before {
-  border-color: transparent #6a5fa8 transparent transparent;
 }
 
 .manual-badge {
   background: #ff6b35 !important;
   border-color: #ff6b35 !important;
-  font-weight: 700;
-  letter-spacing: 0.5px;
-  text-transform: uppercase;
-  font-size: 11px;
-  padding: 2px 8px;
-  box-shadow: 0 2px 4px rgba(255, 107, 53, 0.3);
 }
 
 .manual-notes {
   font-size: 14px;
   cursor: help;
   margin-left: 4px;
-  display: inline-flex;
-  align-items: center;
-  opacity: 0.8;
-  transition: opacity 0.2s ease;
 }
 
 .manual-notes:hover {
-  opacity: 1;
+  opacity: 0.8;
 }
 
 .manual-remove-btn {
