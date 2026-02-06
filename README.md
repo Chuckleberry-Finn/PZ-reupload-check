@@ -1,102 +1,172 @@
-# Project Zomboid Mod Tracker - User Guide
+# Project Zomboid Mod Reupload Tracker
 
-## What Does This Tool Do?
-This tool helps you find unauthorized copies of your mods on Steam Workshop.
+## Overview
+This tool helps mod authors find and report unauthorized copies of their mods on Steam Workshop. The interface is organized into three columns that flow from left to right:
 
----
-
-## Step 1: Start the Tool
-1. Double-click the `DMCA-Tracker.exe` to open it, or run `startWin.bat`.
-2. A web page will open in your browser.
-3. You'll see 3 columns/panels.
+**Tracked Mods** → **Search Results** → **DMCA Manager**
 
 ---
 
-## Step 2: Add Your Mods
-
-### What You Need:
-- **Mod ID** - The modID of your mod (like "SkillRecoveryJournal").
-- **Profile Link/ID** - You can select Fetch to pull all of a profile's mods.
-
-### How to Add:
-1. Click the **"+ Add Mod"** button
-2. Type your Mod ID in the first box
-3. Type your Workshop ID in the second box (optional but helpful)
-4. Click away from the box - it saves automatically!
-
-**Or**
-
-1. Select **Fetch** and type in a profile's ID/URL
-
-### Add More Mods:
-- Click **"+ Add Mod"** again for each mod you want to track
+## Getting Started
+1. Double-click `DMCA-Tracker.exe` or run `startWin.bat`.
+2. A web page opens in your browser with three columns.
 
 ---
 
-## Step 3: Search for Copies
-1. Click the **"Run All Searches"** button.
-2. Wait while the tool looks on Steam.
-3. Results will show up in the middle column.
+## Column 1: Tracked Mods (Left)
+
+This is where you add the mods you want to protect.
+
+### Adding Mods Manually
+1. Click **"+ Add Mod"**.
+2. Enter your **Mod ID** (e.g., `SkillRecoveryJournal`).
+3. Optionally enter your **Workshop ID** to mark your original.
+4. Changes save automatically.
+
+### Fetching from a Steam Profile
+1. Click **"Fetch"**.
+2. Enter a Steam profile URL or ID.
+3. All mods from that profile are added automatically.
+
+### Managing Your List
+- **Export** - Save your tracked mods to a JSON file.
+- **Import** - Load mods from a JSON file.
+- **Import Profile** - Copy mods from another profile in this tool.
+- **Delete** - Hold the × button to remove a mod.
 
 ---
 
-## Step 4: Look at the Results
+## Column 2: Search Results (Middle)
 
-### What the Colors Mean:
-- **Gold/Yellow** = Your original mod (based on matching workshopID)
-- **Green** = Copies you have approved
-- **No color** = Copies that have not been marked
-- **Purple/Blue** = DMCA filed
+This shows Workshop items that match your tracked mods.
+
+### Running Searches
+- Click **"Run All Searches"** to search for all tracked mods.
+- Each mod search appears as a task in the queue (tally marks in status bar).
+- Click a single mod's **"Search"** button to search just that one.
+
+### Adding Items Manually
+Click **"+ Manual"** to add a Workshop item by URL or ID. Useful for items that don't appear in search results.
+
+### Understanding the Colors
+| Color | Meaning |
+|-------|---------|
+| **Gold** | Your original mod (matches your Workshop ID) |
+| **Green** | Approved copy (legitimate/permitted) |
+| **Teal** | Manually added item |
+| **Orange border** | Pending DMCA (not yet filed) |
+| **Purple** | DMCA filed |
+| **Purple (dark)** | Taken down by Steam |
+
+### Filtering Results
+- **Hide Approved** - Show only unapproved items.
+- **Sort** - Order results by date, title, or match count.
+- **Hide Zero** - Hide mods with no results.
+
+### Taking Action
+- **+ Approve** - Mark a copy as legitimate.
+- **+ DMCA** - Add to DMCA Manager for reporting.
 
 ---
 
-## Step 5: Mark Bad Copies
-1. Find the mod that looks suspicious.
-2. Click the **"+ DMCA"** button next to it
-3. It moves to the DMCA Manager section
+## Column 3: DMCA Manager (Right)
 
----
+This is where you manage items you want to report to Steam.
 
-## Step 6: File a Complaint with Steam
+### Viewing Entries
+Filter your list with these options:
+- **Pending Only** - Items not yet filed.
+- **Filed Only** - Items you've reported.
+- **Taken Down Only** - Items Steam has removed.
 
-### Before You Start:
-Verify that the work is in fact your own. While the automatic verification system uses hashes and can be very thorough, you should still verify manually.
+### Verification
+Verify that Workshop items actually contain your files before filing.
 
-**Warning:** Filing false DMCA claims may result in legal penalties
+**Setup (one-time):**
+1. Download [DepotDownloader](https://github.com/SteamRE/DepotDownloader)
+2. Click **"Configure"** and point to the executable
+3. Enter your Steam credentials when/if prompted
 
-### Steps to File a DMCA Notice:
-1. Click **"Copy DMCA Message"** - this copies the text you need. This message actually has two parts, one for each section regarding context.
-2. Click the **"File"** button - this opens Steam's form.
-3. Paste your message, cut and paste the 2nd half into the relevant section, all into Steam's form.
-4. Fill out personal information.
-5. Submit the form to Steam.
-6. Return to the tool and click **"Mark Filed"**.
+**Using Verification:**
+- **Verify All** - Check all pending entries
+- **Verify** (per item) - Check a single entry
+- Results show match percentage (High/Medium/Low/None)
 
----
+### Filing a DMCA Notice
 
-## Step 7: Check if Steam Removed Items
+**Warning:** Filing false DMCA claims may result in legal penalties. Always verify the work is yours.
+
+1. Click **"Copy DMCA Message"** - copies pre-formatted text which includes all links to matching mods found. (This message can be split up between the 2 fields in Steam's DMCA form.)
+2. Click **"File"** - opens Steam's DMCA form.
+3. Paste the message (it has two parts for different form sections).
+4. Fill out your personal information.
+5. Submit to Steam.
+6. Return here and click **"Mark Filed"**.
+
+### Checking Results
 1. Wait several days for Steam to review.
-2. Click **"Re-check Filed"** button.
-3. The tool will check the status of reported items.
-4. Items marked **"TAKEN DOWN"** have been removed by Steam.
+2. Click **"Re-check Filed"** to check status of all filed items.
+3. Items removed by Steam will show as **"TAKEN DOWN"**.
 
----
-
-## Extra Features
-
-### Verify (Advanced)
-- This checks if copies really have your files inside.
-- You need to download something called **DepotDownloader** first:
-  - https://github.com/SteamRE/DepotDownloader
-- Click the gear button (⚙) to set it up.
-- Then click **"Verify"** to check.
-
-### Profiles
-- You can make different lists for tracking.
-- Click the menu button (⋮) next to "Profile".
-- Pick **"New Profile"** to make a new list.
+### Buttons Reference
+| Button | Action |
+|--------|--------|
+| **Copy DMCA Message** | Copy report text to clipboard |
+| **File** | Open Steam's DMCA form |
+| **Mark Filed** | Record that you've submitted |
+| **Verify** | Check single item for your files |
+| **×** | Remove from DMCA list |
 
 ### Exporting/Importing
-- Click **"Export"** to save your mod/DMCA list to a JSON file.
-- Click **"Import"** to load a saved list.
-- This creates a backup of your data.
+- **Export DMCA** - Save your DMCA list to a file.
+- **Import DMCA** - Load a saved DMCA list.
+
+---
+
+## Profiles
+
+Profiles let you maintain separate tracking lists (e.g., for different mod collections).
+
+### Managing Profiles
+1. Click the menu button (**⋮**) next to the profile dropdown.
+2. Options:
+   - **New Profile** - Create a fresh list.
+   - **Rename** - Change profile name.
+   - **Delete** - Remove a profile (hold to confirm).
+
+### Profile Data
+Each profile stores:
+- Tracked mods
+- Search results
+- DMCA entries
+- Manually added items
+- Filter settings
+
+---
+
+## Task Queue
+
+The status bar shows task progress with colored tally marks:
+
+| Color | Task Type |
+|-------|-----------|
+| **Dark Red** | Search |
+| **Dark Blue** | Verification |
+| **Purple** | Re-check filed |
+| **Teal** | Manual add |
+
+- **Pulsing** = Currently running
+- **Faded** = Completed (disappears after 3 seconds)
+- **Dim** = Queued/waiting
+
+Click **Pause/Resume** to control the queue.
+
+---
+
+## Tips
+
+1. **Start with Fetch** - If you have a Steam profile with all your mods, use Fetch to add them quickly.
+2. **Verify before filing** - Use the verification feature to confirm matches.
+3. **Export regularly** - Back up your data with the Export buttons.
+4. **Be patient** - Steam can take days to weeks to process DMCA notices.
+5. **Check the queue** - Watch the tally marks to track search/verify progress.
