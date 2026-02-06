@@ -1821,7 +1821,7 @@ button:active {
    ============================================================================ */
 
 .resultItem.manual-mod {
-  border-left: 3px solid #ff6b35;
+  border-left: 3px solid #17a2b8;
 }
 
 .resultItem.manual-mod.approved {
@@ -1841,8 +1841,8 @@ button:active {
 }
 
 .manual-badge {
-  background: #ff6b35 !important;
-  border-color: #ff6b35 !important;
+  background: #17a2b8 !important;
+  border-color: #17a2b8 !important;
 }
 
 .manual-notes {
@@ -1989,8 +1989,8 @@ button:active {
 
 .form-group input:focus {
   outline: none;
-  border-color: #ff6b35;
-  box-shadow: 0 0 0 3px rgba(255, 107, 53, 0.1);
+  border-color: #17a2b8;
+  box-shadow: 0 0 0 3px rgba(23, 162, 184, 0.1);
 }
 
 .form-group input::placeholder {
@@ -2026,24 +2026,23 @@ button:active {
 }
 
 .dmca-verify-single-btn {
-  background: #2196f3;
+  background: #1a4d7c;
   color: white;
-  border: 1px solid #2196f3;
+  border: 1px solid #2a6da8;
   padding: 4px 10px;
   border-radius: 3px;
   font-size: 12px;
   font-weight: 500;
   cursor: pointer;
   transition: all 0.2s ease;
-  margin-left: auto;
   flex-shrink: 0;
 }
 
 .dmca-verify-single-btn:hover {
-  background: #1976d2;
-  border-color: #1976d2;
+  background: #2a6da8;
+  border-color: #3a8dcc;
   transform: translateY(-1px);
-  box-shadow: 0 2px 6px rgba(33, 150, 243, 0.4);
+  box-shadow: 0 2px 6px rgba(42, 109, 168, 0.4);
 }
 
 .dmca-verify-single-btn:active {
@@ -2062,7 +2061,7 @@ button:active {
 }
 
 .dmca-verify-single-btn.verifying {
-  background: #64b5f6;
+  background: #2a6da8;
   cursor: wait;
   opacity: 0.7;
 }
