@@ -721,6 +721,15 @@ button:active {
     opacity: 0.5;
 }
 
+.queue-tally.completed {
+    opacity: 0.4;
+    animation: tallyFadeOut 3s ease-out forwards;
+}
+
+.queue-tally.queued {
+    opacity: 0.7;
+}
+
 @keyframes tallyPulse {
     0%, 100% { 
         opacity: 1;
@@ -729,6 +738,18 @@ button:active {
     50% { 
         opacity: 0.6;
         transform: scaleY(0.85);
+    }
+}
+
+@keyframes tallyFadeOut {
+    0% { 
+        opacity: 0.6;
+    }
+    70% {
+        opacity: 0.4;
+    }
+    100% { 
+        opacity: 0.2;
     }
 }
 

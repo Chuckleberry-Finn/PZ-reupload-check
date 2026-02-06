@@ -68,6 +68,7 @@ const DELETE_ALL_HOLD_TIME = 1000;
 // ============================================================================
 const TaskQueue = {
   queue: [],
+  completedTasks: [], // Track recently completed tasks
   isProcessing: false,
   isPaused: false,
   currentTask: null,
@@ -79,6 +80,7 @@ const TaskQueue = {
     VERIFY_SINGLE: 'verify_single',
     VERIFY_ALL: 'verify_all',
     RECHECK_FILED: 'recheck_filed',
+    RECHECK_SINGLE: 'recheck_single',
     IMPORT_PROFILE: 'import_profile',
     ADD_MANUAL: 'add_manual'
   },
@@ -101,6 +103,7 @@ const TaskQueue = {
       type,
       params,
       description,
+      status: 'queued', // queued, processing, complete
       addedAt: new Date()
     };
     
@@ -114,35 +117,80 @@ const TaskQueue = {
     return true;
   },
   
+  // Add multiple tasks at once (for batch operations)
+  addBatch(tasks) {
+    let addedCount = 0;
+    for (const { type, params, description } of tasks) {
+      // Check for duplicate
+      const isDuplicate = this.queue.some(task => 
+        task.type === type && JSON.stringify(task.params) === JSON.stringify(params)
+      ) || (this.currentTask && this.currentTask.type === type && 
+            JSON.stringify(this.currentTask.params) === JSON.stringify(params));
+      
+      if (!isDuplicate) {
+        this.queue.push({
+          id: `task_${Date.now()}_${Math.random().toString(36).substr(2, 9)}_${addedCount}`,
+          type,
+          params,
+          description,
+          status: 'queued',
+          addedAt: new Date()
+        });
+        addedCount++;
+      }
+    }
+    
+    this.updateUI();
+    
+    if (!this.isProcessing && !this.isPaused && addedCount > 0) {
+      this.processNext();
+    }
+    
+    return addedCount;
+  },
+  
   // Process the next task in queue
   async processNext() {
     if (this.isPaused || this.queue.length === 0) {
       this.isProcessing = false;
       this.currentTask = null;
       this.updateUI();
-      if (!this.isPaused && this.queue.length === 0) {
-        setStatus('Ready');
-      }
+      // Don't set "Ready" - let the last task's completion message stay visible
       return;
     }
     
     this.isProcessing = true;
     this.currentTask = this.queue.shift();
+    this.currentTask.status = 'processing';
+    setStatus(`[Processing] ${this.currentTask.description}`);
     this.updateUI();
     
+    let taskFailed = false;
     try {
       await this.executeTask(this.currentTask);
     } catch (err) {
       console.error('Task failed:', err);
-      setStatus(`Task failed: ${err.message}`);
+      taskFailed = true;
+      setStatus(`[Failed] ${this.currentTask.description}: ${err.message}`);
+    }
+    
+    // Mark as complete and add to completed list
+    if (!taskFailed) {
+      this.currentTask.status = 'complete';
+      this.currentTask.completedAt = new Date();
+      this.completedTasks.push(this.currentTask);
+      setStatus(`[Complete] ${this.currentTask.description}`);
+      
+      // Remove completed task after 3 seconds
+      const taskId = this.currentTask.id;
+      setTimeout(() => {
+        this.completedTasks = this.completedTasks.filter(t => t.id !== taskId);
+        this.updateUI();
+      }, 3000);
     }
     
     this.currentTask = null;
     this.updateUI();
-    
-    if (this.queue.length > 0) {
-      setStatus(`${this.queue.length} task(s) remaining...`);
-    }
     
     // Small delay between tasks to prevent overwhelming
     await new Promise(r => setTimeout(r, 300));
@@ -168,6 +216,9 @@ const TaskQueue = {
       case this.TYPES.RECHECK_FILED:
         await this.executeRecheckFiled(task.params);
         break;
+      case this.TYPES.RECHECK_SINGLE:
+        await this.executeRecheckSingle(task.params);
+        break;
       case this.TYPES.ADD_MANUAL:
         await this.executeAddManual(task.params);
         break;
@@ -180,7 +231,6 @@ const TaskQueue = {
   async executeSearchSingle(params) {
     const { mod } = params;
     const modId = mod.modId.trim();
-    setStatus(`[Queue] Searching "${modId}"...`);
     
     try {
       const data = await fetchAllForModId(modId, 50);
@@ -205,9 +255,7 @@ const TaskQueue = {
       renderModGroup(group, mod, searchResults[mod.id]);
       updateStats();
       updateDmcaCounts();
-      setStatus(`[Queue] Found ${data.count} result(s) for "${modId}"`);
     } catch (err) {
-      setStatus(`[Queue] Error searching "${modId}": ${err.message}`);
       throw err;
     }
   },
@@ -295,14 +343,12 @@ const TaskQueue = {
     const entry = dmcaEntries.find(e => e.workshopId === workshopId);
     
     if (!entry) {
-      setStatus('[Queue] Entry not found');
-      return;
+      throw new Error('Entry not found');
     }
     
     const config = await checkDepotDownloaderConfig();
     if (!config.configured) {
-      setStatus('[Queue] DepotDownloader not configured - skipping verification');
-      return;
+      throw new Error('DepotDownloader not configured');
     }
     
     // loadTrackedModsForVerify already filters out pseudo-mods
@@ -316,8 +362,6 @@ const TaskQueue = {
         ? realTrackedMods.map(m => m.modId) 
         : (entry.containsModIds || []).filter(id => !id.startsWith('Manual Additions'))
     };
-    
-    setStatus(`[Queue] Verifying ${entry.title}...`);
     
     try {
       setVerifyBtnRunning(true);
@@ -333,7 +377,6 @@ const TaskQueue = {
       
     } catch (err) {
       setVerifyBtnRunning(false);
-      setStatus(`[Queue] Verification failed: ${err.message}`);
       throw err;
     }
   },
@@ -341,7 +384,6 @@ const TaskQueue = {
   // Verify all DMCA entries (placeholder - uses existing bulk verify)
   async executeVerifyAll(params) {
     // This triggers the existing verify process
-    setStatus('[Queue] Starting bulk verification...');
     verifyDmcaBtn?.click();
   },
   
@@ -388,11 +430,39 @@ const TaskQueue = {
     setStatus(`[Queue] Re-check complete. ${takenDownCount} item(s) marked as taken down.`);
   },
   
+  // Recheck single filed item
+  async executeRecheckSingle(params) {
+    const { entry } = params;
+    
+    if (!entry) {
+      return;
+    }
+    
+    try {
+      const resp = await SteamRateLimiter.fetchWithRateLimit(
+        `/api/check-workshop-exists?workshopId=${entry.workshopId}`
+      );
+      const data = await resp.json();
+      
+      if (!data.exists) {
+        // Find the entry in dmcaEntries and mark as taken down
+        const dmcaEntry = dmcaEntries.find(e => e.workshopId === entry.workshopId);
+        if (dmcaEntry) {
+          dmcaEntry.takenDownDate = new Date().toISOString();
+          saveDmcaEntries();
+          renderDmcaManager();
+          updateDmcaCounts();
+        }
+      }
+    } catch (err) {
+      console.error(`Failed to check ${entry.workshopId}:`, err);
+      throw err;
+    }
+  },
+  
   // Add manual mod
   async executeAddManual(params) {
     const { workshopId } = params;
-    setStatus(`[Queue] Adding manual mod ${workshopId}...`);
-    
     // This is handled by the modal form submission
     // Just a placeholder for potential future use
   },
@@ -447,6 +517,7 @@ const TaskQueue = {
       [this.TYPES.VERIFY_SINGLE]: '#2196f3',   // Blue
       [this.TYPES.VERIFY_ALL]: '#2196f3',      // Blue
       [this.TYPES.RECHECK_FILED]: '#7b68ee',   // Medium slate blue
+      [this.TYPES.RECHECK_SINGLE]: '#7b68ee',  // Medium slate blue
       [this.TYPES.IMPORT_PROFILE]: '#2e7d32',  // Green
       [this.TYPES.ADD_MANUAL]: '#17a2b8'       // Teal
     };
@@ -466,12 +537,23 @@ const TaskQueue = {
       statusEl.insertBefore(queueContainer, statusEl.firstChild);
     }
     
-    // Build tally marks for current task + queued tasks
+    // Build tally marks: completed (fading) + current + queued
     const allTasks = [];
+    
+    // Add completed tasks first (they'll fade out)
+    this.completedTasks.forEach(task => {
+      allTasks.push({ ...task, isComplete: true });
+    });
+    
+    // Add current task
     if (this.currentTask) {
       allTasks.push({ ...this.currentTask, isCurrent: true });
     }
-    allTasks.push(...this.queue);
+    
+    // Add queued tasks
+    this.queue.forEach(task => {
+      allTasks.push({ ...task, isQueued: true });
+    });
     
     // Calculate tally width (max 8px, shrink if needed)
     const maxWidth = 8;
@@ -491,12 +573,20 @@ const TaskQueue = {
         const color = this.getTaskColor(task.type);
         const isPaused = this.isPaused;
         const isCurrent = task.isCurrent;
-        const pulseClass = isCurrent && !isPaused ? 'pulsing' : '';
-        const pausedClass = isPaused ? 'paused' : '';
+        const isComplete = task.isComplete;
+        const isQueued = task.isQueued;
         
-        return `<div class="queue-tally ${pulseClass} ${pausedClass}" 
+        let classes = 'queue-tally';
+        if (isCurrent && !isPaused) classes += ' pulsing';
+        if (isPaused) classes += ' paused';
+        if (isComplete) classes += ' completed';
+        if (isQueued) classes += ' queued';
+        
+        let statusText = isComplete ? ' (done)' : isCurrent ? ' (running)' : ' (queued)';
+        
+        return `<div class="${classes}" 
                      style="background-color: ${color}; width: ${tallyWidth}px;" 
-                     title="${escapeHtml(task.description)}${isCurrent ? ' (running)' : ''}"></div>`;
+                     title="${escapeHtml(task.description)}${statusText}"></div>`;
       }).join('');
       
       queueContainer.innerHTML = talliesHtml;
@@ -504,8 +594,9 @@ const TaskQueue = {
     }
     
     // Update status text to show current task
-    if (this.isPaused && allTasks.length > 0) {
-      setStatus(`⏸ Queue paused (${allTasks.length} task${allTasks.length !== 1 ? 's' : ''} waiting)`);
+    if (this.isPaused && (this.queue.length > 0 || this.currentTask)) {
+      const waitingCount = this.queue.length + (this.currentTask ? 1 : 0);
+      setStatus(`⏸ Queue paused (${waitingCount} task${waitingCount !== 1 ? 's' : ''} waiting)`);
     }
   }
 };
@@ -2651,11 +2742,28 @@ function renderSavedResults() {
 // Event listeners
 addModBtn.addEventListener("click", addMod);
 runBtn.addEventListener("click", () => {
-  TaskQueue.add(
-    TaskQueue.TYPES.SEARCH_ALL,
-    {},
-    'Search All Mods'
-  );
+  const activeMods = trackedMods.filter(m => m.modId.trim());
+  
+  if (activeMods.length === 0) {
+    setStatus("No mods to search. Add a Mod ID to start.");
+    return;
+  }
+  
+  // Clear results area for fresh search
+  resultsEl.innerHTML = "";
+  SteamRateLimiter.reset();
+  
+  // Add individual search tasks for each mod
+  const tasks = activeMods.map(mod => ({
+    type: TaskQueue.TYPES.SEARCH_SINGLE,
+    params: { mod },
+    description: `Search: ${mod.modId}`
+  }));
+  
+  const addedCount = TaskQueue.addBatch(tasks);
+  if (addedCount > 0) {
+    setStatus(`[Queued] ${addedCount} search task(s)`);
+  }
 });
 exportBtn.addEventListener("click", exportMods);
 importBtn.addEventListener("click", importMods);
@@ -2668,11 +2776,18 @@ recheckFiledBtn.addEventListener("click", () => {
     showAlert('No Filed Entries', 'There are no filed entries to re-check.', 'info');
     return;
   }
-  TaskQueue.add(
-    TaskQueue.TYPES.RECHECK_FILED,
-    {},
-    `Re-check ${filedEntries.length} filed items`
-  );
+  
+  // Add individual recheck tasks for each filed entry
+  const tasks = filedEntries.map(entry => ({
+    type: TaskQueue.TYPES.RECHECK_SINGLE,
+    params: { entry },
+    description: `Re-check: ${entry.title}`
+  }));
+  
+  const addedCount = TaskQueue.addBatch(tasks);
+  if (addedCount > 0) {
+    setStatus(`[Queued] ${addedCount} re-check task(s)`);
+  }
 });
 
 showPendingOnlyCheckbox.addEventListener("change", () => {
@@ -2787,9 +2902,12 @@ function loadDmcaEntriesForVerify() {
   const entries = profile.dmca || [];
   const realTrackedMods = loadTrackedModsForVerify();
   
+  // Only verify pending entries (not filed, not taken down)
+  const pendingEntries = entries.filter(e => !e.filedDate && !e.takenDownDate);
+  
   // Clean entries: filter out pseudo-mods from containsModIds
   // For manual entries, use ALL tracked mods for comparison
-  return entries.map(entry => ({
+  return pendingEntries.map(entry => ({
     ...entry,
     containsModIds: entry.manual 
       ? realTrackedMods.map(m => m.modId) 
@@ -2804,7 +2922,7 @@ function setVerifyBtnRunning(running) {
     verifyDmcaBtn.textContent = "Verifying...";
   } else {
     verifyDmcaBtn.classList.remove("running");
-    verifyDmcaBtn.textContent = "Verify";
+    verifyDmcaBtn.textContent = "Verify All";
   }
 }
 
