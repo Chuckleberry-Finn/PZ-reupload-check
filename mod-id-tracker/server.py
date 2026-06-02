@@ -222,51 +222,95 @@ def fetch_url(url: str, timeout: int = 15, max_retries: int = 2):
 
     return None, 0, "Max retries exceeded"
 
+
+def _parse_workshop_items_from_html(html_content: str) -> list:
+    """Extract workshop items from Steam's current HTML format.
+
+    Steam's new SSR layout renders each workshop item as a card containing
+    a title link inside a div with class "_3rvey4VpXts-", e.g.:
+
+        <div class="_3rvey4VpXts-">
+            <a href="...filedetails/?id=12345">Mod Title Here</a>
+        </div>
+
+    We also try the img alt fallback in case the title div isn't present.
+    """
+    items = []
+    seen = set()
+
+    # Primary: title link inside the _3rvey4VpXts- div (confirmed in new HTML)
+    primary = re.findall(
+        r'class="_3rvey4VpXts-"><a[^>]+\?id=(\d+)[^>]*>([^<]+)<',
+        html_content
+    )
+    for wid, title in primary:
+        if wid not in seen:
+            seen.add(wid)
+            items.append({
+                "workshopId": wid,
+                "title": title.strip() or f"Workshop Item {wid}",
+                "url": f"https://steamcommunity.com/sharedfiles/filedetails/?id={wid}"
+            })
+
+    # Fallback: img alt text next to filedetails link (catches items missing title div)
+    if not items:
+        fallback = re.findall(
+            r'filedetails/\?id=(\d+)"[^>]*><img alt="([^"]+)"',
+            html_content
+        )
+        for wid, title in fallback:
+            if wid not in seen:
+                seen.add(wid)
+                items.append({
+                    "workshopId": wid,
+                    "title": title.strip() or f"Workshop Item {wid}",
+                    "url": f"https://steamcommunity.com/sharedfiles/filedetails/?id={wid}"
+                })
+
+    return items
+
+
 def search_workshop(mod_id: str, max_pages: int = 5):
+    """Search the Workshop browse page for items matching 'Mod ID: <mod_id>'.
+
+    Parses Steam's new SSR JSON-embedded HTML format instead of old CSS classes.
+    """
     results = []
     seen = set()
     consecutive_empty = 0
     max_consecutive_empty = 2
 
     for page in range(1, max_pages + 1):
-        url = f"https://steamcommunity.com/workshop/browse/?appid={PZ_APP_ID}&searchtext=%22Mod+ID%3A+{urllib.parse.quote(mod_id)}%22&browsesort=mostrecent&section=&actualsort=mostrecent&p={page}"
+        url = (
+            f"https://steamcommunity.com/workshop/browse/"
+            f"?appid={PZ_APP_ID}"
+            f"&searchtext=%22Mod+ID%3A+{urllib.parse.quote(mod_id)}%22"
+            f"&browsesort=mostrecent&section=readytouseitems"
+            f"&actualsort=mostrecent&p={page}"
+        )
         print(f"[Search] Fetching page {page}/{max_pages} for '{mod_id}'...")
 
         html_content, status_code, error = fetch_url(url, timeout=20)
 
         if status_code in (403, 429):
-            print(f"[Search] Rate limited on page {page}")
             return None, {"error": "Steam blocked/rate-limited the request.", "statusCode": status_code}
 
         if not html_content:
-            print(f"[Search] No content returned for page {page}")
             consecutive_empty += 1
             if consecutive_empty >= max_consecutive_empty:
-                print(f"[Search] Stopping after {consecutive_empty} empty pages")
                 break
             time.sleep(1.0)
             continue
 
         if "g-recaptcha" in html_content or "captcha" in html_content.lower():
-            print(f"[Search] CAPTCHA detected")
             return None, {"error": "Steam is showing a CAPTCHA challenge. Wait then retry.", "statusCode": 503}
 
-        item_pattern = r'data-publishedfileid="(\d+)"[^>]*>.*?<div class="workshopItemTitle[^"]*">([^<]+)</div>'
-        matches = re.findall(item_pattern, html_content, re.DOTALL)
-
-        if not matches:
-            alt_pattern = r'sharedfiles/filedetails/\?id=(\d+)"[^>]*>.*?<div[^>]*workshopItemTitle[^>]*>([^<]+)</div>'
-            matches = re.findall(alt_pattern, html_content, re.DOTALL)
-
+        items = _parse_workshop_items_from_html(html_content)
         page_found = 0
-        for workshop_id, title in matches:
-            if workshop_id not in seen:
-                seen.add(workshop_id)
-                results.append({
-                    "workshopId": workshop_id,
-                    "title": title.strip(),
-                    "url": f"https://steamcommunity.com/sharedfiles/filedetails/?id={workshop_id}"
-                })
+        for item in items:
+            if item["workshopId"] not in seen:
+                seen.add(item["workshopId"])
+                results.append(item)
                 page_found += 1
 
         if page_found > 0:
@@ -276,169 +320,129 @@ def search_workshop(mod_id: str, max_pages: int = 5):
             consecutive_empty += 1
             print(f"[Search] No items on page {page} (empty count: {consecutive_empty})")
             if consecutive_empty >= max_consecutive_empty:
-                print(f"[Search] Stopping search - no results on last {consecutive_empty} pages")
                 break
-        
-        # Rate limiter handles delays automatically
 
     print(f"[Search] Complete - found {len(results)} total items for '{mod_id}'")
     return results, None
 
 def check_workshop_exists(workshop_id: str):
-    """Check if workshop item exists"""
-    url = f"https://steamcommunity.com/sharedfiles/filedetails/?id={workshop_id}"
+    """Check if workshop item exists using GetPublishedFileDetails API."""
+    data, error = _get_published_file_details([workshop_id])
+    if error or not data:
+        return True, None  # Assume exists on error
+    files = data.get("response", {}).get("publishedfiledetails", [])
+    if not files:
+        return False, None
+    f = files[0]
+    # result=9 means item doesn't exist / removed
+    if f.get("result", 1) != 1:
+        return False, None
+    title = f.get("title", "").strip() or None
+    return True, title
+
+def _get_published_file_details(workshop_ids: list):
+    """Batch-fetch file details from ISteamRemoteStorage/GetPublishedFileDetails."""
+    steam_rate_limiter.wait_if_needed()
+    params = {"itemcount": len(workshop_ids)}
+    for i, wid in enumerate(workshop_ids):
+        params[f"publishedfileids[{i}]"] = wid
+    data = urllib.parse.urlencode(params).encode()
+    url = "https://api.steampowered.com/ISteamRemoteStorage/GetPublishedFileDetails/v1/"
+    req = urllib.request.Request(url, data=data, method="POST", headers={
+        "Content-Type": "application/x-www-form-urlencoded",
+        "User-Agent": "Mozilla/5.0",
+    })
     try:
-        req = urllib.request.Request(url, headers={
-            "User-Agent": "Mozilla/5.0"
-        })
-        with urllib.request.urlopen(req, timeout=15) as resp:
-            html = resp.read().decode("utf-8", errors="ignore")
-            if 'class="error_ctn"' in html:
-                if "There was a problem accessing the item" in html:
-                    return False, None
-                if "This item has been removed" in html:
-                    return False, None
-            title = None
-            m = re.search(r'<div class="workshopItemTitle">([^<]+)</div>', html)
-            if m:
-                title = m.group(1).strip()
-            has_content = ("workshopItemTitle" in html) or ("workshopItemDescription" in html)
-            return has_content, title
+        with urllib.request.urlopen(req, timeout=20) as resp:
+            steam_rate_limiter.reset_backoff()
+            return json.loads(resp.read().decode("utf-8", errors="ignore")), None
     except urllib.error.HTTPError as e:
-        if e.code == 404:
-            return False, None
-        return True, None
-    except:
-        return True, None
-
-def extract_mod_id(workshop_id: str):
-    """Extract Mod ID from workshop item page"""
-    url = f"https://steamcommunity.com/sharedfiles/filedetails/?id={workshop_id}"
-    try:
-        req = urllib.request.Request(url, headers={
-            "User-Agent": "Mozilla/5.0"
-        })
-        with urllib.request.urlopen(req, timeout=15) as resp:
-            html = resp.read().decode("utf-8", errors="ignore")
-
-            # Look for "Mod ID: xxxxx" pattern in description
-            patterns = [
-                r'Mod ID:\s*([A-Za-z0-9_\-\s]+?)(?:\s*(?:<|[\r\n]|$))',
-                r'ModID:\s*([A-Za-z0-9_\-\s]+?)(?:\s*(?:<|[\r\n]|$))',
-                r'mod\s*id:\s*([A-Za-z0-9_\-\s]+?)(?:\s*(?:<|[\r\n]|$))',
-            ]
-
-            for pattern in patterns:
-                match = re.search(pattern, html, re.IGNORECASE)
-                if match:
-                    return match.group(1).strip(), None
-
-            return None, "Mod ID not found in description"
+        if e.code in (403, 429):
+            steam_rate_limiter.mark_rate_limited()
+        return None, f"HTTP {e.code}"
     except Exception as e:
         return None, str(e)
 
+
+def extract_mod_id(workshop_id: str):
+    """Extract Mod ID from a workshop item's description via API."""
+    data, error = _get_published_file_details([workshop_id])
+    if error or not data:
+        return None, error or "API request failed"
+    files = data.get("response", {}).get("publishedfiledetails", [])
+    if not files or files[0].get("result", 1) != 1:
+        return None, "Workshop item not found or removed"
+    description = files[0].get("description", "") or ""
+    patterns = [
+        r'Mod\s*ID:\s*([A-Za-z0-9_\-]+)',
+        r'ModID:\s*([A-Za-z0-9_\-]+)',
+        r'mod\s*id:\s*([A-Za-z0-9_\-]+)',
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, description, re.IGNORECASE)
+        if match:
+            return match.group(1).strip(), None
+    return None, "Mod ID not found in description"
+
 def get_workshop_full_details(workshop_id: str):
-    """Fetch full workshop item details including title and all mod IDs from description"""
-    url = f"https://steamcommunity.com/sharedfiles/filedetails/?id={workshop_id}"
-    try:
-        req = urllib.request.Request(url, headers={
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
-        })
-        with urllib.request.urlopen(req, timeout=15) as resp:
-            html = resp.read().decode("utf-8", errors="ignore")
-            
-            # Check if item exists
-            if 'class="error_ctn"' in html:
-                if "There was a problem accessing the item" in html or "This item has been removed" in html:
-                    return {
-                        "exists": False,
-                        "workshopId": workshop_id,
-                        "error": "Workshop item not found or removed"
-                    }
-            
-            # Extract title
-            title = None
-            title_match = re.search(r'<div class="workshopItemTitle">([^<]+)</div>', html)
-            if title_match:
-                title = title_match.group(1).strip()
-            
-            # Extract author
-            author = None
-            author_match = re.search(r'<div class="friendBlockContent">\s*([^<]+)\s*<br', html)
-            if author_match:
-                author = author_match.group(1).strip()
-            
-            # Extract all Mod IDs from the description
-            # Look for "Mod ID: xxxxx" patterns - there may be multiple
-            mod_ids = []
-            
-            # Pattern to find all Mod ID occurrences
-            mod_id_patterns = [
-                r'Mod\s*ID:\s*([A-Za-z0-9_\-]+)',
-                r'ModID:\s*([A-Za-z0-9_\-]+)',
-                r'mod\s*id:\s*([A-Za-z0-9_\-]+)',
-                # Also look for mod IDs in format "Mod ID(s): xxx, yyy"
-                r'Mod\s*IDs?:\s*([A-Za-z0-9_\-,\s]+?)(?:\s*(?:<br|<\/|[\r\n]|$))',
-            ]
-            
-            seen_mod_ids = set()
-            for pattern in mod_id_patterns:
-                matches = re.findall(pattern, html, re.IGNORECASE)
-                for match in matches:
-                    # Handle comma-separated mod IDs
-                    for mod_id in match.split(','):
-                        mod_id = mod_id.strip()
-                        # Validate it looks like a mod ID (not too long, no HTML)
-                        if mod_id and len(mod_id) <= 100 and '<' not in mod_id and mod_id.lower() not in seen_mod_ids:
-                            seen_mod_ids.add(mod_id.lower())
-                            mod_ids.append(mod_id)
-            
-            has_content = ("workshopItemTitle" in html) or ("workshopItemDescription" in html)
-            
-            return {
-                "exists": has_content,
-                "workshopId": workshop_id,
-                "title": title,
-                "author": author,
-                "modIds": mod_ids
-            }
-            
-    except urllib.error.HTTPError as e:
-        if e.code == 404:
-            return {
-                "exists": False,
-                "workshopId": workshop_id,
-                "error": "Workshop item not found (404)"
-            }
+    """Fetch full workshop item details via Steam API."""
+    data, error = _get_published_file_details([workshop_id])
+    if error or not data:
         return {
-            "exists": True,  # Assume exists if we get other HTTP errors
+            "exists": True,
             "workshopId": workshop_id,
-            "title": None,
-            "author": None,
-            "modIds": [],
-            "error": f"HTTP error: {e.code}"
+            "title": None, "author": None, "modIds": [],
+            "error": error or "API request failed"
         }
-    except Exception as e:
+    files = data.get("response", {}).get("publishedfiledetails", [])
+    if not files or files[0].get("result", 1) != 1:
         return {
-            "exists": True,  # Assume exists on other errors
+            "exists": False,
             "workshopId": workshop_id,
-            "title": None,
-            "author": None,
-            "modIds": [],
-            "error": str(e)
+            "error": "Workshop item not found or removed"
         }
+
+    f = files[0]
+    title = f.get("title", "").strip() or None
+    # creator_appid steam_id -> we can surface the creator's steamid
+    creator = str(f.get("creator", "") or "")
+    description = f.get("description", "") or ""
+
+    # Extract all Mod IDs from description (plain text, no HTML tags)
+    mod_ids = []
+    seen_mod_ids = set()
+    mod_id_patterns = [
+        r'Mod\s*ID:\s*([A-Za-z0-9_\-]+)',
+        r'ModID:\s*([A-Za-z0-9_\-]+)',
+        r'Mod\s*IDs?:\s*([A-Za-z0-9_\-,\s]+?)(?:\r|\n|$)',
+    ]
+    for pattern in mod_id_patterns:
+        for match in re.findall(pattern, description, re.IGNORECASE):
+            for mod_id in match.split(','):
+                mod_id = mod_id.strip()
+                if mod_id and len(mod_id) <= 100 and mod_id.lower() not in seen_mod_ids:
+                    seen_mod_ids.add(mod_id.lower())
+                    mod_ids.append(mod_id)
+
+    return {
+        "exists": True,
+        "workshopId": workshop_id,
+        "title": title,
+        "author": creator,   # steamid64; front-end only uses for display
+        "modIds": mod_ids
+    }
 
 def search_profile_workshop(profile_input: str, max_pages: int = 10):
-    """Search for workshop items from a Steam profile"""
-    # Parse profile input to get profile ID
+    """Fetch workshop items from a Steam profile page.
+
+    Parses Steam's new SSR JSON-embedded HTML. Accepts a Steam64 ID,
+    vanity URL name, or full steamcommunity.com URL.
+    """
     profile_id = profile_input.strip()
 
-    # Extract from URL if needed
     if "steamcommunity.com" in profile_id:
-        # Extract ID from URL
-        id_match = re.search(r'/id/([^/]+)', profile_id)
+        id_match = re.search(r'/id/([^/?#]+)', profile_id)
         profiles_match = re.search(r'/profiles/(\d+)', profile_id)
-
         if id_match:
             profile_id = id_match.group(1)
         elif profiles_match:
@@ -451,7 +455,6 @@ def search_profile_workshop(profile_input: str, max_pages: int = 10):
 
     page = 1
     while page <= max_pages:
-        # Try custom URL first, then numeric ID
         if profile_id.isdigit():
             url = f"https://steamcommunity.com/profiles/{profile_id}/myworkshopfiles/?appid={PZ_APP_ID}&p={page}"
         else:
@@ -464,44 +467,27 @@ def search_profile_workshop(profile_input: str, max_pages: int = 10):
         if status_code in (403, 429):
             rate_limit_count += 1
             if rate_limit_count > max_rate_limit_retries:
-                print(f"[Profile] Rate limit exceeded {max_rate_limit_retries} times, aborting")
                 return None, {"error": "Steam rate limit exceeded after multiple retries.", "statusCode": status_code}
-
-            # Progressive delay: 5s, then 10s, then 15s
             delay = 5 * rate_limit_count
-            print(f"[Profile] Rate limited (attempt {rate_limit_count}/{max_rate_limit_retries}), waiting {delay} seconds...")
+            print(f"[Profile] Rate limited, waiting {delay}s...")
             time.sleep(delay)
-            continue  # Retry same page
+            continue
 
-        # Reset rate limit counter on success
         if html_content:
             rate_limit_count = 0
 
         if not html_content:
-            print(f"[Profile] No content returned for page {page}")
             break
 
         if "g-recaptcha" in html_content or "captcha" in html_content.lower():
-            print(f"[Profile] CAPTCHA detected")
             return None, {"error": "Steam is showing a CAPTCHA challenge. Wait then retry.", "statusCode": 503}
 
-        # Parse workshop items from profile page
-        item_pattern = r'data-publishedfileid="(\d+)"[^>]*>.*?<div class="workshopItemTitle[^"]*">([^<]+)</div>'
-        matches = re.findall(item_pattern, html_content, re.DOTALL)
-
-        if not matches:
-            alt_pattern = r'sharedfiles/filedetails/\?id=(\d+)"[^>]*>.*?<div[^>]*workshopItemTitle[^>]*>([^<]+)</div>'
-            matches = re.findall(alt_pattern, html_content, re.DOTALL)
-
+        items = _parse_workshop_items_from_html(html_content)
         page_found = 0
-        for workshop_id, title in matches:
-            if workshop_id not in seen:
-                seen.add(workshop_id)
-                results.append({
-                    "workshopId": workshop_id,
-                    "title": title.strip(),
-                    "url": f"https://steamcommunity.com/sharedfiles/filedetails/?id={workshop_id}"
-                })
+        for item in items:
+            if item["workshopId"] not in seen:
+                seen.add(item["workshopId"])
+                results.append(item)
                 page_found += 1
 
         print(f"[Profile] Found {page_found} items on page {page} (total: {len(results)})")
@@ -509,7 +495,6 @@ def search_profile_workshop(profile_input: str, max_pages: int = 10):
         if page_found == 0:
             break
 
-        # Rate limiter handles delays automatically
         page += 1
 
     print(f"[Profile] Complete - found {len(results)} total items from profile")

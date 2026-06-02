@@ -112,21 +112,35 @@ def save_manifest_mapping(depot_dir, mapping):
         json.dump(mapping, f, indent=2)
 
 def check_workshop_exists(workshop_id):
-    url = f"https://steamcommunity.com/sharedfiles/filedetails/?id={workshop_id}"
+    """Check if a workshop item exists using the Steam Web API.
+    Uses ISteamRemoteStorage/GetPublishedFileDetails - stable, no HTML scraping.
+    result == 1 means the item exists; result == 9 means not found / removed.
+    """
     try:
-        req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
-        with urllib.request.urlopen(req, timeout=15) as response:
-            html = response.read().decode('utf-8', errors='ignore')
-            if 'error_ctn' in html and ('problem accessing' in html or 'removed' in html):
-                return False, None
-            title_match = re.search(r'<div class="workshopItemTitle">([^<]+)</div>', html)
-            title = title_match.group(1).strip() if title_match else None
-            has_content = 'workshopItemTitle' in html or 'workshopItemDescription' in html
-            return has_content, title
+        params = urllib.parse.urlencode({
+            "itemcount": 1,
+            "publishedfileids[0]": workshop_id,
+        }).encode()
+        req = urllib.request.Request(
+            "https://api.steampowered.com/ISteamRemoteStorage/GetPublishedFileDetails/v1/",
+            data=params,
+            method="POST",
+            headers={
+                "Content-Type": "application/x-www-form-urlencoded",
+                "User-Agent": "Mozilla/5.0",
+            }
+        )
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            data = json.loads(resp.read().decode("utf-8", errors="ignore"))
+        files = data.get("response", {}).get("publishedfiledetails", [])
+        if not files or files[0].get("result", 1) != 1:
+            return False, None
+        title = files[0].get("title", "").strip() or None
+        return True, title
     except urllib.error.HTTPError as e:
         if e.code == 404:
             return False, None
-        return True, None
+        return True, None  # Assume exists on other HTTP errors
     except Exception as e:
         log(f"[Warning] Error checking workshop {workshop_id}: {e}")
         return True, None
