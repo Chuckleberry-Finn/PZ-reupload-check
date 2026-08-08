@@ -1076,6 +1076,20 @@ button:active {
     font-size: 10px;
 }
 
+.copy-link,
+.resultItem .badge.copy-id {
+    cursor: pointer;
+}
+
+.copy-link:hover {
+    text-decoration: underline;
+}
+
+.resultItem .badge.copy-id:hover {
+    background: var(--bg-secondary, var(--bg-primary));
+    border-color: var(--text-secondary);
+}
+
 .resultItem.approved .badge {
     background: var(--success);
     color: #fff;

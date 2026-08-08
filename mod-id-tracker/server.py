@@ -105,6 +105,15 @@ steam_rate_limiter = SteamRateLimiter(
 # Paths / constants
 PZ_APP_ID = "108600"
 
+# Workshop item IDs that are actually static Steam page-chrome links, not
+# real search results. These show up in the raw HTML/JSON of every browse
+# and profile page regardless of search terms (e.g. the "Learn More" link
+# to the Modding Policy in the workshop header), so they're filtered out
+# defensively wherever items are collected.
+KNOWN_NON_RESULT_WORKSHOP_IDS = {
+    "2872282653",  # Spiffo's Workshop "Learn More" -> Modding Policy page
+}
+
 if getattr(sys, "frozen", False):
     ROOT_DIR = Path(sys._MEIPASS)
 else:
@@ -325,17 +334,23 @@ def _parse_workshop_items_from_html(html_content: str):
                     "url": f"https://steamcommunity.com/sharedfiles/filedetails/?id={wid}",
                 })
 
-    # Fallback 3: bare filedetails links (no title recovered, but at least
-    # the IDs come through so nothing silently vanishes).
+    # NOTE: there used to be a Fallback 3 here that grabbed *any*
+    # sharedfiles/filedetails/?id=... link on the page as a last resort.
+    # That's unsafe: Steam's workshop header always contains a static
+    # "Learn More" link to the Modding Policy page (id=2872282653), plus
+    # other page-chrome links, none of which are search results. When a
+    # search legitimately returned zero real matches, that fallback would
+    # silently report the policy page (or other chrome) as a "found" item.
+    # A clean zero-results is far safer than a false positive here, so we
+    # deliberately don't grab unscoped links anymore.
     if not items:
-        for wid in re.findall(r'sharedfiles/filedetails/\?id=(\d+)', html_content):
-            if wid not in seen:
-                seen.add(wid)
-                items.append({
-                    "workshopId": wid,
-                    "title": f"Workshop Item {wid}",
-                    "url": f"https://steamcommunity.com/sharedfiles/filedetails/?id={wid}",
-                })
+        print("[Parse] No items found via JSON or scoped HTML fallbacks "
+              "- treating as a genuine zero-result page.")
+
+    # Belt-and-suspenders: filter out known Steam page-chrome IDs even if
+    # they somehow slipped through one of the paths above.
+    if items:
+        items = [it for it in items if it["workshopId"] not in KNOWN_NON_RESULT_WORKSHOP_IDS]
 
     return items, total_pages
 

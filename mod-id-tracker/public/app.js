@@ -1804,8 +1804,8 @@ function renderModGroup(group, mod, data) {
 
     return `<div class="${cls}" data-workshopid="${escapeHtml(wid)}"${displayStyle}>
       <div class="resultItem-content">
-        <a target="_blank" rel="noreferrer" href="${escapeHtml(it.url)}"><strong class="copy-id" data-id="${escapeHtml(wid)}">${escapeHtml(it.title || "(No title found)")}</strong></a>
-        <span class="badge">ID ${escapeHtml(wid)}</span>${statusBadge}
+        <a target="_blank" rel="noreferrer" href="${escapeHtml(it.url)}"><strong class="copy-link" data-url="${escapeHtml(it.url)}" title="Click to copy link">${escapeHtml(it.title || "(No title found)")}</strong></a>
+        <span class="badge copy-id" data-id="${escapeHtml(wid)}" title="Click to copy ID">ID ${escapeHtml(wid)}</span>${statusBadge}
       </div>${buttonHtml}
     </div>`;
   }).join("");
@@ -1826,6 +1826,10 @@ function renderModGroup(group, mod, data) {
       e.stopPropagation();
       toggleDmcaEntry(btn.dataset.workshopid, btn.dataset.title, btn.dataset.modid);
     });
+  });
+
+  content.querySelectorAll(".copy-link").forEach(el => {
+    el.addEventListener("click", (e) => { e.preventDefault(); e.stopPropagation(); copyToClipboard(el.dataset.url); });
   });
 
   content.querySelectorAll(".copy-id").forEach(el => {
