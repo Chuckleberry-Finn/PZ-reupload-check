@@ -223,51 +223,121 @@ def fetch_url(url: str, timeout: int = 15, max_retries: int = 2):
     return None, 0, "Max retries exceeded"
 
 
-def _parse_workshop_items_from_html(html_content: str) -> list:
-    """Extract workshop items from Steam's current HTML format.
+def _extract_ssr_render_context(html_content: str):
+    """Pull Steam's embedded TanStack-Query hydration state out of the page.
 
-    Steam's new SSR layout renders each workshop item as a card containing
-    a title link inside a div with class "_3rvey4VpXts-", e.g.:
+    Steam's current SSR frontend ships a line like:
 
-        <div class="_3rvey4VpXts-">
-            <a href="...filedetails/?id=12345">Mod Title Here</a>
-        </div>
+        window.SSR.renderContext=JSON.parse("{...escaped JSON...}");
 
-    We also try the img alt fallback in case the title div isn't present.
+    That JSON blob contains a `queryData` field (itself a JSON string) with
+    every server-fetched query result for the page - including the exact
+    workshop_browse / myworkshopfiles results array, already structured,
+    with no CSS classes to keep up with. Class names in the rendered HTML
+    (e.g. what used to be "_3rvey4VpXts-") are build-hashed and can change
+    on every Steam frontend deploy, so we prefer this JSON source and only
+    fall back to HTML scraping if it's missing.
+    """
+    m = re.search(
+        r'window\.SSR\.renderContext\s*=\s*JSON\.parse\("(.*?)"\);',
+        html_content,
+        re.DOTALL,
+    )
+    if not m:
+        return None
+    try:
+        raw = m.group(1)
+        # `raw` is already JSON-escaped exactly like a JSON string body,
+        # so wrapping it in quotes and decoding once unescapes it back to
+        # plain text, and json.loads-ing that gives us the real object.
+        outer = json.loads('"' + raw + '"')
+        return json.loads(outer) if isinstance(outer, str) else outer
+    except Exception as e:
+        print(f"[Parse] Failed to decode SSR renderContext: {e}")
+        return None
+
+
+def _parse_workshop_items_from_html(html_content: str):
+    """Extract workshop items (and total page count, if known) from a page.
+
+    Returns (items, total_pages). total_pages is None if it couldn't be
+    determined (older/plain HTML fallback paths).
     """
     items = []
     seen = set()
+    total_pages = None
 
-    # Primary: title link inside the _3rvey4VpXts- div (confirmed in new HTML)
-    primary = re.findall(
-        r'class="_3rvey4VpXts-"><a[^>]+\?id=(\d+)[^>]*>([^<]+)<',
-        html_content
-    )
-    for wid, title in primary:
+    ctx = _extract_ssr_render_context(html_content)
+    if ctx:
+        try:
+            qd_raw = ctx.get("queryData")
+            qd = json.loads(qd_raw) if isinstance(qd_raw, str) else (qd_raw or {})
+            for q in qd.get("queries", []):
+                data = (q.get("state") or {}).get("data")
+                if isinstance(data, dict) and isinstance(data.get("results"), list):
+                    if data.get("total_pages") is not None:
+                        total_pages = data.get("total_pages")
+                    for r in data["results"]:
+                        wid = str(r.get("publishedfileid") or "").strip()
+                        if wid and wid not in seen:
+                            seen.add(wid)
+                            items.append({
+                                "workshopId": wid,
+                                "title": (r.get("title") or "").strip() or f"Workshop Item {wid}",
+                                "url": f"https://steamcommunity.com/sharedfiles/filedetails/?id={wid}",
+                                "author": str(r.get("creator") or "") or None,
+                                "shortDescription": (r.get("short_description") or "").strip() or None,
+                                "subscriptions": r.get("subscriptions"),
+                                "timeUpdated": r.get("time_updated"),
+                            })
+        except Exception as e:
+            print(f"[Parse] JSON extraction failed, will try HTML fallback: {e}")
+
+    if items:
+        return items, total_pages
+
+    # Fallback 1: current title-div class as of this writing. Steam hashes
+    # these per-build so this WILL drift again - it's a safety net, not
+    # the primary path.
+    for wid, title in re.findall(
+        r'class="Sw3NXcvOA4Y-"><a[^>]+\?id=(\d+)[^>]*>([^<]+)<',
+        html_content,
+    ):
         if wid not in seen:
             seen.add(wid)
             items.append({
                 "workshopId": wid,
                 "title": title.strip() or f"Workshop Item {wid}",
-                "url": f"https://steamcommunity.com/sharedfiles/filedetails/?id={wid}"
+                "url": f"https://steamcommunity.com/sharedfiles/filedetails/?id={wid}",
             })
 
-    # Fallback: img alt text next to filedetails link (catches items missing title div)
+    # Fallback 2: img alt text next to filedetails link.
     if not items:
-        fallback = re.findall(
-            r'filedetails/\?id=(\d+)"[^>]*><img alt="([^"]+)"',
-            html_content
-        )
-        for wid, title in fallback:
+        for wid, title in re.findall(
+            r'filedetails/\?id=(\d+)"[^>]*><img[^>]+alt="([^"]+)"',
+            html_content,
+        ):
             if wid not in seen:
                 seen.add(wid)
                 items.append({
                     "workshopId": wid,
                     "title": title.strip() or f"Workshop Item {wid}",
-                    "url": f"https://steamcommunity.com/sharedfiles/filedetails/?id={wid}"
+                    "url": f"https://steamcommunity.com/sharedfiles/filedetails/?id={wid}",
                 })
 
-    return items
+    # Fallback 3: bare filedetails links (no title recovered, but at least
+    # the IDs come through so nothing silently vanishes).
+    if not items:
+        for wid in re.findall(r'sharedfiles/filedetails/\?id=(\d+)', html_content):
+            if wid not in seen:
+                seen.add(wid)
+                items.append({
+                    "workshopId": wid,
+                    "title": f"Workshop Item {wid}",
+                    "url": f"https://steamcommunity.com/sharedfiles/filedetails/?id={wid}",
+                })
+
+    return items, total_pages
 
 
 def search_workshop(mod_id: str, max_pages: int = 5):
@@ -305,7 +375,7 @@ def search_workshop(mod_id: str, max_pages: int = 5):
         if "g-recaptcha" in html_content or "captcha" in html_content.lower():
             return None, {"error": "Steam is showing a CAPTCHA challenge. Wait then retry.", "statusCode": 503}
 
-        items = _parse_workshop_items_from_html(html_content)
+        items, total_pages = _parse_workshop_items_from_html(html_content)
         page_found = 0
         for item in items:
             if item["workshopId"] not in seen:
@@ -321,6 +391,12 @@ def search_workshop(mod_id: str, max_pages: int = 5):
             print(f"[Search] No items on page {page} (empty count: {consecutive_empty})")
             if consecutive_empty >= max_consecutive_empty:
                 break
+
+        # Steam tells us the real page count now - stop as soon as we've
+        # covered it instead of guessing from empty-page streaks.
+        if total_pages is not None and page >= total_pages:
+            print(f"[Search] Reached last page ({total_pages}) per Steam's own count.")
+            break
 
     print(f"[Search] Complete - found {len(results)} total items for '{mod_id}'")
     return results, None
@@ -482,7 +558,7 @@ def search_profile_workshop(profile_input: str, max_pages: int = 10):
         if "g-recaptcha" in html_content or "captcha" in html_content.lower():
             return None, {"error": "Steam is showing a CAPTCHA challenge. Wait then retry.", "statusCode": 503}
 
-        items = _parse_workshop_items_from_html(html_content)
+        items, total_pages = _parse_workshop_items_from_html(html_content)
         page_found = 0
         for item in items:
             if item["workshopId"] not in seen:

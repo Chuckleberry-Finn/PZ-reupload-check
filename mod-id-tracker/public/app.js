@@ -253,6 +253,7 @@ const TaskQueue = {
       }
       
       renderModGroup(group, mod, searchResults[mod.id]);
+      applyResultsFilters();
       updateStats();
       updateDmcaCounts();
     } catch (err) {
@@ -311,6 +312,7 @@ const TaskQueue = {
         searchResults[mod.id] = { ...data, mod, searchDate };
         saveData();
         renderModGroup(group, mod, searchResults[mod.id]);
+        applyResultsFilters();
         completedCount++;
       } catch (err) {
         group.querySelector(".group-header h3").innerHTML = `<code>${escapeHtml(modId)}</code><span class="badge">Error</span>`;
@@ -1712,6 +1714,7 @@ async function searchSingleMod(mod) {
     }
 
     renderModGroup(group, mod, searchResults[mod.id]);
+    applyResultsFilters();
     updateStats();
     updateDmcaCounts();
     setStatus(`Found ${data.count} result(s) for "${modId}"`);
