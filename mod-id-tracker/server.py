@@ -180,6 +180,82 @@ def set_depotdownloader_path(path_str: str):
     save_verify_config(config)
 
 
+def get_steam_username():
+    """Steam username DepotDownloader should log in as (if configured).
+
+    DepotDownloader cannot piggyback on an already-open Steam client's
+    session - it's a standalone SteamKit2 process with its own connection
+    to Steam. If anonymous access to this app's workshop content stops
+    working, the only way forward is a real login. See set_steam_username
+    below for the one-time setup this requires.
+    """
+    config = load_verify_config()
+    if config.has_option('Steam', 'username'):
+        name = config.get('Steam', 'username').strip()
+        return name or None
+    return None
+
+def set_steam_username(username_str: str):
+    """Save the Steam username DepotDownloader should use.
+
+    This alone is NOT enough to authenticate: DepotDownloader still needs
+    a one-time interactive login run from an actual terminal/console (not
+    through this web UI, since that subprocess has no real stdin/stdout
+    for a password + Steam Guard prompt):
+
+        DepotDownloader -app 108600 -username <username> -remember-password
+
+    Complete the password entry and Steam Guard confirmation there once.
+    DepotDownloader then caches a login key locally, and every future run
+    (including the ones this server spawns) can log in silently with just
+    -username <username> - no password needed again unless that cached
+    session is later revoked.
+
+    Before reaching for this at all, see get_workshop_app_id() below -
+    "login failed" symptoms are often actually an outdated DepotDownloader
+    mis-resolving manifest codes for shared/proxied depots, not a real
+    anonymous-access lockout.
+    """
+    config = load_verify_config()
+    if not config.has_section('Steam'):
+        config.add_section('Steam')
+    config.set('Steam', 'username', username_str.strip())
+    save_verify_config(config)
+
+
+def get_workshop_app_id():
+    """AppID passed to DepotDownloader's -app for workshop manifest requests.
+
+    Defaults to PZ_APP_ID, overridable via [Workshop] app_id in
+    verify_config.ini.
+
+    DepotDownloader resolves the manifest-request app id differently
+    depending on whether the app you pass to -app is itself flagged
+    FreeToDownload on Steam, when the actual depot is a shared/proxied
+    one (DepotFromApp): non-free apps use the depot's real source app,
+    free-to-download apps use the app id you passed in directly. Builds
+    older than 3.1.0 had this backwards for the free-app case ("Fixed
+    getting manifest code for FreeToDownload apps that use DepotFromApp"),
+    which produces the exact same "Login failed" / "not subscribed"
+    output as a genuine anonymous-access lockout, with no account issue
+    at all. If PZ's workshop depot is proxied from a different
+    free-to-download app, point this at that app's id instead.
+    """
+    config = load_verify_config()
+    if config.has_option('Workshop', 'app_id'):
+        app_id = config.get('Workshop', 'app_id').strip()
+        return app_id or PZ_APP_ID
+    return PZ_APP_ID
+
+def set_workshop_app_id(app_id_str: str):
+    """Save an override app id for workshop manifest requests."""
+    config = load_verify_config()
+    if not config.has_section('Workshop'):
+        config.add_section('Workshop')
+    config.set('Workshop', 'app_id', app_id_str.strip())
+    save_verify_config(config)
+
+
 # Existing search endpoints
 def fetch_url(url: str, timeout: int = 15, max_retries: int = 2):
     """Fetch URL with retry logic and rate limiting"""
@@ -334,7 +410,78 @@ def _parse_workshop_items_from_html(html_content: str):
                     "url": f"https://steamcommunity.com/sharedfiles/filedetails/?id={wid}",
                 })
 
-    # NOTE: there used to be a Fallback 3 here that grabbed *any*
+    # Fallback 3: classic (pre-SSR-redesign) profile workshop-files page.
+    # /profiles/<id>/myworkshopfiles/ (and /id/<vanity>/myworkshopfiles/)
+    # still serve Steam's long-standing legacy template - no window.SSR
+    # JSON blob at all, and none of the new /workshop/browse/ page's
+    # build-hashed classes exist here.
+    if not items:
+        # 3a (preferred): each item's hover script calls
+        # SharedFileBindMouseHover("sharedfile_<id>", <bool>, {json}) with
+        # a clean JSON object - id, title, description, appid. This is
+        # more reliable than scraping the surrounding HTML/classes at all,
+        # same reasoning as preferring the browse page's SSR JSON blob.
+        pattern = r'SharedFileBindMouseHover\(\s*"sharedfile_\d+"\s*,\s*\w+\s*,\s*(\{.*?\})\s*\)\s*;'
+        for m in re.finditer(pattern, html_content, re.DOTALL):
+            try:
+                obj = json.loads(m.group(1))
+            except Exception:
+                continue
+            wid = str(obj.get("id") or "").strip()
+            if not wid or wid in seen:
+                continue
+            seen.add(wid)
+            items.append({
+                "workshopId": wid,
+                "title": (obj.get("title") or "").strip() or f"Workshop Item {wid}",
+                "url": f"https://steamcommunity.com/sharedfiles/filedetails/?id={wid}",
+                "shortDescription": (obj.get("description") or "").strip() or None,
+            })
+        if items:
+            print(f"[Parse] Found {len(items)} item(s) via legacy page's SharedFileBindMouseHover data.")
+
+        # 3b (fallback): if the hover-script data isn't present for some
+        # reason, scope to each "workshopItem" block and pull the id
+        # (from the filedetails link on the preview thumbnail) and title
+        # (from the sibling "workshopItemTitle" div - note this class
+        # often has extra modifiers appended, e.g. "workshopItemTitle
+        # ellipsis", so the match can't require an exact class value).
+        # These are SIBLING elements, not nested in one another. (This
+        # page has no "Learn More" policy-link chrome like the browse
+        # page, so scoping to workshopItem blocks doesn't reintroduce the
+        # earlier false-positive risk from an unscoped link grab.)
+        if not items:
+            for block in re.split(r'(?=class="workshopItem")', html_content):
+                if 'class="workshopItem"' not in block:
+                    continue
+                id_match = re.search(r'filedetails/\?id=(\d+)', block)
+                if not id_match:
+                    continue
+                wid = id_match.group(1)
+                if wid in seen:
+                    continue
+                title_match = re.search(r'class="workshopItemTitle[^"]*"[^>]*>([^<]+)<', block)
+                title = title_match.group(1).strip() if title_match else ""
+                seen.add(wid)
+                items.append({
+                    "workshopId": wid,
+                    "title": title or f"Workshop Item {wid}",
+                    "url": f"https://steamcommunity.com/sharedfiles/filedetails/?id={wid}",
+                })
+            if items:
+                print(f"[Parse] Found {len(items)} item(s) via legacy workshopItem block scan.")
+
+        if items:
+            # Legacy pagination: "Showing 1-9 of 28 entries" tells us the
+            # real total so callers can stop at the right page instead of
+            # guessing from empty-page streaks.
+            m = re.search(r'of\s+([\d,]+)\s+entries', html_content)
+            if m:
+                total_entries = int(m.group(1).replace(",", ""))
+                per_page = max(len(items), 1)
+                total_pages = -(-total_entries // per_page)  # ceil div
+
+    # NOTE: there used to be a Fallback here that grabbed *any*
     # sharedfiles/filedetails/?id=... link on the page as a last resort.
     # That's unsafe: Steam's workshop header always contains a static
     # "Learn More" link to the Modding Policy page (id=2872282653), plus
@@ -546,10 +693,13 @@ def search_profile_workshop(profile_input: str, max_pages: int = 10):
 
     page = 1
     while page <= max_pages:
+        # numperpage=30 is the highest value this legacy page template
+        # accepts (9 is the default) - cuts the number of pages needed
+        # for profiles with a lot of submissions roughly 3x.
         if profile_id.isdigit():
-            url = f"https://steamcommunity.com/profiles/{profile_id}/myworkshopfiles/?appid={PZ_APP_ID}&p={page}"
+            url = f"https://steamcommunity.com/profiles/{profile_id}/myworkshopfiles/?appid={PZ_APP_ID}&p={page}&numperpage=30"
         else:
-            url = f"https://steamcommunity.com/id/{profile_id}/myworkshopfiles/?appid={PZ_APP_ID}&p={page}"
+            url = f"https://steamcommunity.com/id/{profile_id}/myworkshopfiles/?appid={PZ_APP_ID}&p={page}&numperpage=30"
 
         print(f"[Profile] Fetching page {page}/{max_pages} from {profile_id}...")
 
@@ -584,6 +734,10 @@ def search_profile_workshop(profile_input: str, max_pages: int = 10):
         print(f"[Profile] Found {page_found} items on page {page} (total: {len(results)})")
 
         if page_found == 0:
+            break
+
+        if total_pages is not None and page >= total_pages:
+            print(f"[Profile] Reached last page ({total_pages}).")
             break
 
         page += 1
@@ -899,6 +1053,46 @@ class RequestHandler(BaseHTTPRequestHandler):
             self.send_json({"ok": True, "path": depot_path_str, "message": "DepotDownloader path saved"})
             return
 
+        if path == "/api/config/steam-username":
+            username_str = payload.get("username", "").strip()
+            if not username_str:
+                self.send_json({"error": "No username provided"}, 400)
+                return
+
+            set_steam_username(username_str)
+            self.send_json({
+                "ok": True,
+                "username": username_str,
+                "message": (
+                    "Username saved. This alone doesn't log you in - DepotDownloader can't "
+                    "reuse an already-open Steam client's session. Run this once from a real "
+                    "terminal (not through this web UI) to complete the login and Steam "
+                    f"Guard prompt: DepotDownloader -app {PZ_APP_ID} -username {username_str} "
+                    "-remember-password"
+                ),
+            })
+            return
+
+        if path == "/api/config/workshop-app-id":
+            app_id_str = payload.get("appId", "").strip()
+            if not app_id_str:
+                self.send_json({"error": "No appId provided"}, 400)
+                return
+
+            set_workshop_app_id(app_id_str)
+            self.send_json({
+                "ok": True,
+                "appId": app_id_str,
+                "message": (
+                    f"Workshop app id for manifest requests set to {app_id_str}. Try this "
+                    "(and updating DepotDownloader to >= 3.1.0) before setting up a real Steam "
+                    "login - 'Login failed'/'not subscribed' errors on a shared/proxied depot "
+                    "are often just a manifest-code resolution issue, not an actual account "
+                    "lockout."
+                ),
+            })
+            return
+
         self.send_json({"error": "Unknown POST route"}, 404)
 
     def do_GET(self):
@@ -921,6 +1115,21 @@ class RequestHandler(BaseHTTPRequestHandler):
             self.send_json({
                 "configured": depot_path is not None,
                 "path": str(depot_path) if depot_path else None
+            })
+            return
+
+        if path == "/api/config/steam-username":
+            username = get_steam_username()
+            self.send_json({
+                "configured": username is not None,
+                "username": username,
+            })
+            return
+
+        if path == "/api/config/workshop-app-id":
+            self.send_json({
+                "appId": get_workshop_app_id(),
+                "isDefault": get_workshop_app_id() == PZ_APP_ID,
             })
             return
 
